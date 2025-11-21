@@ -75,6 +75,12 @@ func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 		// Add tags from metadata
 		tagSpanFromMetadata(grpcSpan, hub, md, info.FullMethod)
 
+		if md != nil {
+			if tenantIDs := md.Get("fwd-x-tenant-id"); len(tenantIDs) > 0 {
+				ctx = WithTenantID(ctx, tenantIDs[0])
+			}
+		}
+
 		// Add the span to the context so handlers can access it
 		ctx = context.WithValue(ctx, grpcSpanContextKey{}, grpcSpan)
 
@@ -243,4 +249,3 @@ func grpcCodeToSentryStatus(code codes.Code) sentry.SpanStatus {
 		return sentry.SpanStatusUnknown
 	}
 }
-
