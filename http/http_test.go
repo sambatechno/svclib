@@ -56,10 +56,13 @@ func TestSetURL(t *testing.T) {
 
 	result := api.SetURL(url)
 
-	// Test method chaining
-	if result != api {
-		t.Error("SetURL should return the same instance for chaining")
+	// Test immutable builder pattern - should return a new instance
+	if result == api {
+		t.Error("SetURL should return a new instance (immutable builder pattern)")
 	}
+
+	// Test that method chaining works (returns IAPI interface)
+	var _ IAPI = result
 
 	// Test that URL is set (we can't directly access the field, but we can test via executeRequest)
 	// This will be tested indirectly through other tests
@@ -72,10 +75,13 @@ func TestSetHeader(t *testing.T) {
 
 	result := api.SetHeader(key, value)
 
-	// Test method chaining
-	if result != api {
-		t.Error("SetHeader should return the same instance for chaining")
+	// Test immutable builder pattern - should return a new instance
+	if result == api {
+		t.Error("SetHeader should return a new instance (immutable builder pattern)")
 	}
+
+	// Test that method chaining works
+	var _ IAPI = result
 }
 
 func TestSetHeaders(t *testing.T) {
@@ -87,10 +93,13 @@ func TestSetHeaders(t *testing.T) {
 
 	result := api.SetHeaders(headers)
 
-	// Test method chaining
-	if result != api {
-		t.Error("SetHeaders should return the same instance for chaining")
+	// Test immutable builder pattern - should return a new instance
+	if result == api {
+		t.Error("SetHeaders should return a new instance (immutable builder pattern)")
 	}
+
+	// Test that method chaining works
+	var _ IAPI = result
 }
 
 func TestSetBody(t *testing.T) {
@@ -99,10 +108,13 @@ func TestSetBody(t *testing.T) {
 
 	result := api.SetBody(body)
 
-	// Test method chaining
-	if result != api {
-		t.Error("SetBody should return the same instance for chaining")
+	// Test immutable builder pattern - should return a new instance
+	if result == api {
+		t.Error("SetBody should return a new instance (immutable builder pattern)")
 	}
+
+	// Test that method chaining works
+	var _ IAPI = result
 }
 
 func TestSetQuery(t *testing.T) {
@@ -112,10 +124,13 @@ func TestSetQuery(t *testing.T) {
 
 	result := api.SetQuery(key, value)
 
-	// Test method chaining
-	if result != api {
-		t.Error("SetQuery should return the same instance for chaining")
+	// Test immutable builder pattern - should return a new instance
+	if result == api {
+		t.Error("SetQuery should return a new instance (immutable builder pattern)")
 	}
+
+	// Test that method chaining works
+	var _ IAPI = result
 }
 
 func TestSetQueries(t *testing.T) {
@@ -127,10 +142,13 @@ func TestSetQueries(t *testing.T) {
 
 	result := api.SetQueries(queries)
 
-	// Test method chaining
-	if result != api {
-		t.Error("SetQueries should return the same instance for chaining")
+	// Test immutable builder pattern - should return a new instance
+	if result == api {
+		t.Error("SetQueries should return a new instance (immutable builder pattern)")
 	}
+
+	// Test that method chaining works
+	var _ IAPI = result
 }
 
 func TestPOSTSuccess(t *testing.T) {
@@ -170,7 +188,7 @@ func TestPOSTSuccess(t *testing.T) {
 
 	// Test API call
 	api := NewAPI()
-	response, err := api.SetURL(server.URL+testPath).
+	resp, body, err := api.SetURL(server.URL+testPath).
 		SetHeader(headerAuthorization, testBearerToken).
 		SetBody(map[string]string{testBodyName: testBodyValue}).
 		SetQuery(testQueryPage, testQueryPageValue).
@@ -180,8 +198,12 @@ func TestPOSTSuccess(t *testing.T) {
 		t.Fatalf(errMsgPOSTRequestFailed, err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -212,7 +234,7 @@ func TestGETSuccess(t *testing.T) {
 
 	// Test API call
 	api := NewAPI()
-	response, err := api.SetURL(server.URL+"/test").
+	resp, body, err := api.SetURL(server.URL+"/test").
 		SetQuery(testQueryPage, testQueryPageValue).
 		GET()
 
@@ -220,8 +242,12 @@ func TestGETSuccess(t *testing.T) {
 		t.Fatalf(errMsgGETRequestFailed, err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -242,7 +268,7 @@ func TestPUTSuccess(t *testing.T) {
 
 	// Test API call
 	api := NewAPI()
-	response, err := api.SetURL(server.URL + "/test").
+	resp, body, err := api.SetURL(server.URL + "/test").
 		SetBody(map[string]string{testBodyName: testBodyValue}).
 		PUT()
 
@@ -250,8 +276,12 @@ func TestPUTSuccess(t *testing.T) {
 		t.Fatalf(errMsgPUTRequestFailed, err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -272,15 +302,19 @@ func TestDELETESuccess(t *testing.T) {
 
 	// Test API call
 	api := NewAPI()
-	response, err := api.SetURL(server.URL + "/test").
+	resp, body, err := api.SetURL(server.URL + "/test").
 		DELETE()
 
 	if err != nil {
 		t.Fatalf(errMsgDELETERequestFailed, err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -294,24 +328,31 @@ func TestPOSTHTTPError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Test API call
+	// Test API call - status code validation is now caller's responsibility
 	api := NewAPI()
-	_, err := api.SetURL(server.URL + "/test").POST()
+	resp, body, err := api.SetURL(server.URL + "/test").POST()
 
-	if err == nil {
-		t.Fatal("Expected error for HTTP 500 status, got nil")
+	if err != nil {
+		t.Fatalf("POST should succeed even with 500 status, got error: %v", err)
 	}
 
-	expectedError := "unexpected http status: 500"
-	if err.Error() != expectedError {
-		t.Errorf("Expected error '%s', got '%s'", expectedError, err.Error())
+	// Verify we got the error status code
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("Expected status code %d, got %d", http.StatusInternalServerError, resp.StatusCode)
+	}
+
+	// Verify we got the error body
+	var errorBody map[string]string
+	json.Unmarshal(body, &errorBody)
+	if errorBody["error"] != "internal server error" {
+		t.Errorf("Expected error body, got %v", errorBody)
 	}
 }
 
 func TestPOSTInvalidURL(t *testing.T) {
 	// Test with invalid URL
 	api := NewAPI()
-	_, err := api.SetURL("invalid-url").POST()
+	_, _, err := api.SetURL("invalid-url").POST()
 
 	if err == nil {
 		t.Fatal("Expected error for invalid URL, got nil")
@@ -321,7 +362,7 @@ func TestPOSTInvalidURL(t *testing.T) {
 func TestPOSTJSONMarshalError(t *testing.T) {
 	// Test with body that can't be marshaled to JSON
 	api := NewAPI()
-	_, err := api.SetURL(testURL).
+	_, _, err := api.SetURL(testURL).
 		SetBody(make(chan int)). // channels can't be marshaled to JSON
 		POST()
 
@@ -333,7 +374,7 @@ func TestPOSTJSONMarshalError(t *testing.T) {
 func TestPOSTNetworkError(t *testing.T) {
 	// Test with unreachable URL
 	api := NewAPI()
-	_, err := api.SetURL("http://unreachable-url-that-does-not-exist.com/test").POST()
+	_, _, err := api.SetURL("http://unreachable-url-that-does-not-exist.com/test").POST()
 
 	if err == nil {
 		t.Fatal("Expected error for unreachable URL, got nil")
@@ -350,14 +391,18 @@ func TestPOSTWithCreatedStatus(t *testing.T) {
 
 	// Test API call
 	api := NewAPI()
-	response, err := api.SetURL(server.URL + "/test").POST()
+	resp, body, err := api.SetURL(server.URL + "/test").POST()
 
 	if err != nil {
 		t.Fatalf(errMsgPOSTRequestFailed, err)
 	}
 
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("Expected status code %d, got %d", http.StatusCreated, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusCreated {
 		t.Errorf(errMsgExpectedCreated, result["status"])
 	}
@@ -378,7 +423,7 @@ func TestPOSTWithCustomContentType(t *testing.T) {
 
 	// Test API call with custom content type
 	api := NewAPI()
-	response, err := api.SetURL(server.URL+"/test").
+	resp, body, err := api.SetURL(server.URL+"/test").
 		SetHeader(headerContentType, contentTypeXML).
 		SetBody(map[string]string{testBodyName: testBodyValue}).
 		POST()
@@ -387,8 +432,12 @@ func TestPOSTWithCustomContentType(t *testing.T) {
 		t.Fatalf(errMsgPOSTRequestFailed, err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -409,14 +458,18 @@ func TestPOSTWithoutBody(t *testing.T) {
 
 	// Test API call without body
 	api := NewAPI()
-	response, err := api.SetURL(server.URL + "/test").POST()
+	resp, body, err := api.SetURL(server.URL + "/test").POST()
 
 	if err != nil {
 		t.Fatalf(errMsgPOSTRequestFailed, err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -444,15 +497,19 @@ func TestPATCHMethod(t *testing.T) {
 
 	// Test PATCH method using executeRequest directly
 	api := NewAPI().(*API) // Cast to concrete type to access executeRequest
-	response, err := api.SetURL(server.URL + "/test").
+	resp, body, err := api.SetURL(server.URL + "/test").
 		SetBody(map[string]string{testBodyName: testBodyValue}).(*API).executeRequest(http.MethodPatch)
 
 	if err != nil {
 		t.Fatalf("PATCH request failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -468,14 +525,18 @@ func TestExecuteRequestWithEmptyQueryParams(t *testing.T) {
 
 	// Test with empty query params map
 	api := NewAPI().(*API) // Cast to concrete type to access executeRequest
-	response, err := api.SetURL(server.URL + "/test").(*API).executeRequest(http.MethodGet)
+	resp, body, err := api.SetURL(server.URL + "/test").(*API).executeRequest(http.MethodGet)
 
 	if err != nil {
 		t.Fatalf("Request with empty query params failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -491,14 +552,18 @@ func TestExecuteRequestWithNilBody(t *testing.T) {
 
 	// Test with nil body
 	api := NewAPI().(*API) // Cast to concrete type to access executeRequest
-	response, err := api.SetURL(server.URL + "/test").(*API).executeRequest(http.MethodPost)
+	resp, body, err := api.SetURL(server.URL + "/test").(*API).executeRequest(http.MethodPost)
 
 	if err != nil {
 		t.Fatalf("Request with nil body failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -514,14 +579,18 @@ func TestExecuteRequestWithEmptyHeaders(t *testing.T) {
 
 	// Test with empty headers
 	api := NewAPI().(*API) // Cast to concrete type to access executeRequest
-	response, err := api.SetURL(server.URL + "/test").(*API).executeRequest(http.MethodGet)
+	resp, body, err := api.SetURL(server.URL + "/test").(*API).executeRequest(http.MethodGet)
 
 	if err != nil {
 		t.Fatalf("Request with empty headers failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -545,7 +614,7 @@ func TestExecuteRequestWithQueryParams(t *testing.T) {
 
 	// Test with query params
 	api := NewAPI().(*API) // Cast to concrete type to access executeRequest
-	response, err := api.SetURL(server.URL+"/test").
+	resp, body, err := api.SetURL(server.URL+"/test").
 		SetQuery(testQueryPage, testQueryPageValue).
 		SetQuery(testQueryLimit, testQueryLimitValue).(*API).executeRequest(http.MethodGet)
 
@@ -553,8 +622,12 @@ func TestExecuteRequestWithQueryParams(t *testing.T) {
 		t.Fatalf("Request with query params failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -582,7 +655,7 @@ func TestExecuteRequestWithBodyAndCustomContentType(t *testing.T) {
 
 	// Test with body and custom content type
 	api := NewAPI().(*API) // Cast to concrete type to access executeRequest
-	response, err := api.SetURL(server.URL+"/test").
+	resp, body, err := api.SetURL(server.URL+"/test").
 		SetHeader(headerContentType, contentTypeXML).
 		SetBody(map[string]string{testBodyName: testBodyValue}).(*API).executeRequest(http.MethodPost)
 
@@ -590,8 +663,12 @@ func TestExecuteRequestWithBodyAndCustomContentType(t *testing.T) {
 		t.Fatalf("Request with body and custom content type failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -613,14 +690,18 @@ func TestExecuteRequestWithNilQueryParams(t *testing.T) {
 		queryParams: nil, // This is the key - nil instead of empty map
 	}
 
-	response, err := api.executeRequest(http.MethodGet)
+	resp, body, err := api.executeRequest(http.MethodGet)
 
 	if err != nil {
 		t.Fatalf("Request with nil query params failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -645,15 +726,19 @@ func TestExecuteRequestWithBodyButUnsupportedMethod(t *testing.T) {
 
 	// Test with body but GET method (which doesn't support body)
 	api := NewAPI().(*API) // Cast to concrete type to access executeRequest
-	response, err := api.SetURL(server.URL + "/test").
+	resp, body, err := api.SetURL(server.URL + "/test").
 		SetBody(map[string]string{testBodyName: testBodyValue}).(*API).executeRequest(http.MethodGet)
 
 	if err != nil {
 		t.Fatalf("Request with body but unsupported method failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -678,15 +763,19 @@ func TestExecuteRequestWithBodyButDELETE(t *testing.T) {
 
 	// Test with body but DELETE method (which doesn't support body)
 	api := NewAPI().(*API) // Cast to concrete type to access executeRequest
-	response, err := api.SetURL(server.URL + "/test").
+	resp, body, err := api.SetURL(server.URL + "/test").
 		SetBody(map[string]string{testBodyName: testBodyValue}).(*API).executeRequest(http.MethodDelete)
 
 	if err != nil {
 		t.Fatalf("Request with body but DELETE method failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -695,7 +784,7 @@ func TestExecuteRequestWithBodyButDELETE(t *testing.T) {
 func TestExecuteRequestWithEmptyURL(t *testing.T) {
 	// Test with empty URL
 	api := NewAPI().(*API) // Cast to concrete type to access executeRequest
-	_, err := api.executeRequest(http.MethodGet)
+	_, _, err := api.executeRequest(http.MethodGet)
 
 	if err == nil {
 		t.Fatal("Expected error for empty URL, got nil")
@@ -730,8 +819,8 @@ func TestCustomTimeout(t *testing.T) {
 	// Test that custom timeout is applied
 	customTimeout := 10 * time.Second
 	api := NewAPI().(*API)
-	api.SetTimeout(customTimeout)
-	client := api.createHTTPClient()
+	apiWithTimeout := api.SetTimeout(customTimeout).(*API)
+	client := apiWithTimeout.createHTTPClient()
 
 	if client.Timeout != customTimeout {
 		t.Errorf("Expected custom timeout of %v, got %v", customTimeout, client.Timeout)
@@ -748,8 +837,8 @@ func TestInternalCallNoTimeout(t *testing.T) {
 
 	// Test that internal calls have no timeout
 	api := NewAPI().(*API)
-	api.SetInternal()
-	client := api.createHTTPClient()
+	apiInternal := api.SetInternal().(*API)
+	client := apiInternal.createHTTPClient()
 
 	if client.Timeout != 0 {
 		t.Errorf("Expected no timeout (0) for internal calls, got %v", client.Timeout)
@@ -759,16 +848,15 @@ func TestInternalCallNoTimeout(t *testing.T) {
 func TestSetTimeoutOverridesInternal(t *testing.T) {
 	// Test that SetTimeout overrides SetInternal
 	api := NewAPI().(*API)
-	api.SetInternal()
-	api.SetTimeout(5 * time.Second)
-	client := api.createHTTPClient()
+	apiWithTimeout := api.SetInternal().SetTimeout(5 * time.Second).(*API)
+	client := apiWithTimeout.createHTTPClient()
 
 	if client.Timeout != 5*time.Second {
 		t.Errorf("Expected timeout of 5s after SetTimeout, got %v", client.Timeout)
 	}
 
 	// Verify isInternal is false
-	if api.isInternal {
+	if apiWithTimeout.isInternal {
 		t.Error("Expected isInternal to be false after SetTimeout")
 	}
 }
@@ -776,16 +864,15 @@ func TestSetTimeoutOverridesInternal(t *testing.T) {
 func TestSetInternalOverridesTimeout(t *testing.T) {
 	// Test that SetInternal overrides custom timeout
 	api := NewAPI().(*API)
-	api.SetTimeout(10 * time.Second)
-	api.SetInternal()
-	client := api.createHTTPClient()
+	apiInternal := api.SetTimeout(10 * time.Second).SetInternal().(*API)
+	client := apiInternal.createHTTPClient()
 
 	if client.Timeout != 0 {
 		t.Errorf("Expected no timeout (0) after SetInternal, got %v", client.Timeout)
 	}
 
 	// Verify isInternal is true
-	if !api.isInternal {
+	if !apiInternal.isInternal {
 		t.Error("Expected isInternal to be true after SetInternal")
 	}
 }
@@ -801,7 +888,7 @@ func TestTimeoutWithPOSTRequest(t *testing.T) {
 	// Test that timeout works with actual request
 	customTimeout := 5 * time.Second
 	api := NewAPI()
-	response, err := api.SetURL(server.URL + testPath).
+	resp, body, err := api.SetURL(server.URL + testPath).
 		SetTimeout(customTimeout).
 		POST()
 
@@ -809,8 +896,12 @@ func TestTimeoutWithPOSTRequest(t *testing.T) {
 		t.Fatalf("POST request with custom timeout failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
@@ -826,7 +917,7 @@ func TestInternalCallWithPOSTRequest(t *testing.T) {
 
 	// Test that internal calls work without timeout
 	api := NewAPI()
-	response, err := api.SetURL(server.URL + testPath).
+	resp, body, err := api.SetURL(server.URL + testPath).
 		SetInternal().
 		POST()
 
@@ -834,8 +925,12 @@ func TestInternalCallWithPOSTRequest(t *testing.T) {
 		t.Fatalf("POST request with internal flag failed: %v", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+	}
+
 	var result map[string]string
-	json.Unmarshal(response, &result)
+	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}

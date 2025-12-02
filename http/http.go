@@ -13,6 +13,9 @@ import (
 // DefaultTimeout is the default timeout for external API calls (30 seconds)
 const DefaultTimeout = 30 * time.Second
 
+// ErrUnmarshalJSON is the error message when JSON unmarshaling fails
+const ErrUnmarshalJSON = "failed to unmarshal JSON response: %w"
+
 // IAPI defines the interface for HTTP client operations.
 // This interface enables dependency injection and makes it easy to mock for unit testing.
 //
@@ -27,13 +30,21 @@ const DefaultTimeout = 30 * time.Second
 //	}
 //
 //	func (s *MyService) DoSomething() error {
-//	    data, err := s.httpClient.SetURL("https://api.example.com/data").
+//	    resp, data, err := s.httpClient.SetURL("https://api.example.com/data").
 //	        SetHeader("Authorization", "Bearer token").
 //	        GET()
+//	    if err != nil {
+//	        return err
+//	    }
+//	    defer resp.Body.Close()
+//	    // Access resp.StatusCode, resp.Header, etc.
 //	    // ...
 //	}
 //
 // For testing, you can create a mock implementation of IAPI.
+//
+// Note: Generic JSON methods (GetJSON, PostJSON, etc.) are available on the concrete API type
+// but cannot be part of the interface due to Go's interface limitations with generics.
 type IAPI interface {
 	SetURL(urlStr string) IAPI
 	SetHeader(key, value string) IAPI
@@ -43,10 +54,10 @@ type IAPI interface {
 	SetQueries(queryParams map[string]string) IAPI
 	SetTimeout(timeout time.Duration) IAPI
 	SetInternal() IAPI
-	POST() ([]byte, error)
-	GET() ([]byte, error)
-	PUT() ([]byte, error)
-	DELETE() ([]byte, error)
+	POST() (*http.Response, []byte, error)
+	GET() (*http.Response, []byte, error)
+	PUT() (*http.Response, []byte, error)
+	DELETE() (*http.Response, []byte, error)
 }
 
 // API is the HTTP client implementation
@@ -67,108 +78,165 @@ func NewAPI() IAPI {
 	}
 }
 
+// copy creates a deep copy of the API instance for immutable builder pattern
+func (a *API) copy() *API {
+	newHeaders := make(map[string]string, len(a.headers))
+	for k, v := range a.headers {
+		newHeaders[k] = v
+	}
+	newQueryParams := make(map[string]string, len(a.queryParams))
+	for k, v := range a.queryParams {
+		newQueryParams[k] = v
+	}
+	return &API{
+		url:         a.url,
+		headers:     newHeaders,
+		body:        a.body,
+		queryParams: newQueryParams,
+		timeout:     a.timeout,
+		isInternal:  a.isInternal,
+	}
+}
+
 // SetURL sets the URL for the request
+// Returns a new API instance to ensure immutability and thread safety.
 func (a *API) SetURL(urlStr string) IAPI {
-	a.url = urlStr
-	return a
+	newAPI := a.copy()
+	newAPI.url = urlStr
+	return newAPI
 }
 
 // SetHeader sets a single header
+// Returns a new API instance to ensure immutability and thread safety.
 func (a *API) SetHeader(key, value string) IAPI {
-	a.headers[key] = value
-	return a
+	newAPI := a.copy()
+	newAPI.headers[key] = value
+	return newAPI
 }
 
 // SetHeaders sets multiple headers
+// Returns a new API instance to ensure immutability and thread safety.
+// The input map is copied to prevent external modifications.
 func (a *API) SetHeaders(headers map[string]string) IAPI {
+	newAPI := a.copy()
 	for key, value := range headers {
-		a.headers[key] = value
+		newAPI.headers[key] = value
 	}
-	return a
+	return newAPI
 }
 
 // SetBody sets the request body
+// Returns a new API instance to ensure immutability and thread safety.
 func (a *API) SetBody(body interface{}) IAPI {
-	a.body = body
-	return a
+	newAPI := a.copy()
+	newAPI.body = body
+	return newAPI
 }
 
 // SetQuery sets a single query parameter
+// Returns a new API instance to ensure immutability and thread safety.
 func (a *API) SetQuery(key, value string) IAPI {
-	a.queryParams[key] = value
-	return a
+	newAPI := a.copy()
+	newAPI.queryParams[key] = value
+	return newAPI
 }
 
 // SetQueries sets multiple query parameters
+// Returns a new API instance to ensure immutability and thread safety.
+// The input map is copied to prevent external modifications.
 func (a *API) SetQueries(queryParams map[string]string) IAPI {
+	newAPI := a.copy()
 	for key, value := range queryParams {
-		a.queryParams[key] = value
+		newAPI.queryParams[key] = value
 	}
-	return a
+	return newAPI
 }
 
 // SetTimeout sets the timeout for the HTTP client.
 // This overrides the default timeout and marks the call as external.
 // To make an internal call (no timeout), use SetInternal() instead.
+// Returns a new API instance to ensure immutability and thread safety.
 func (a *API) SetTimeout(timeout time.Duration) IAPI {
-	a.timeout = timeout
-	a.isInternal = false
-	return a
+	newAPI := a.copy()
+	newAPI.timeout = timeout
+	newAPI.isInternal = false
+	return newAPI
 }
 
 // SetInternal marks this request as an internal API call, which will have no timeout.
 // This is useful for service-to-service communication within the same infrastructure.
+// Returns a new API instance to ensure immutability and thread safety.
 func (a *API) SetInternal() IAPI {
-	a.isInternal = true
-	a.timeout = 0
-	return a
+	newAPI := a.copy()
+	newAPI.isInternal = true
+	newAPI.timeout = 0
+	return newAPI
 }
 
-// POST executes a POST request
-func (a *API) POST() ([]byte, error) {
+// POST executes a POST request and returns the response, body, and error.
+// The response body is automatically closed after reading.
+// The response struct (StatusCode, Header, etc.) remains accessible.
+func (a *API) POST() (*http.Response, []byte, error) {
 	return a.executeRequest(http.MethodPost)
 }
 
-// GET executes a GET request
-func (a *API) GET() ([]byte, error) {
+// GET executes a GET request and returns the response, body, and error.
+// The response body is automatically closed after reading.
+// The response struct (StatusCode, Header, etc.) remains accessible.
+func (a *API) GET() (*http.Response, []byte, error) {
 	return a.executeRequest(http.MethodGet)
 }
 
-// PUT executes a PUT request
-func (a *API) PUT() ([]byte, error) {
+// PUT executes a PUT request and returns the response, body, and error.
+// The response body is automatically closed after reading.
+// The response struct (StatusCode, Header, etc.) remains accessible.
+func (a *API) PUT() (*http.Response, []byte, error) {
 	return a.executeRequest(http.MethodPut)
 }
 
-// DELETE executes a DELETE request
-func (a *API) DELETE() ([]byte, error) {
+// DELETE executes a DELETE request and returns the response, body, and error.
+// The response body is automatically closed after reading.
+// The response struct (StatusCode, Header, etc.) remains accessible.
+func (a *API) DELETE() (*http.Response, []byte, error) {
 	return a.executeRequest(http.MethodDelete)
 }
 
 // executeRequest executes the HTTP request with the configured parameters
-func (a *API) executeRequest(method string) ([]byte, error) {
+// Returns the response, body, and error. The response body is automatically closed after reading.
+func (a *API) executeRequest(method string) (*http.Response, []byte, error) {
 	payload, err := a.buildPayload(method)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	requestURL, err := a.buildRequestURL()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	req, err := a.buildHTTPRequest(method, requestURL, payload)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	client := a.createHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer resp.Body.Close()
+	// Read the body first, then close it immediately
+	// Once the body is read, we can close it - the response struct (headers, status, etc.)
+	// remains fully accessible after closing the body stream.
+	body, err := a.processResponse(resp)
+	if err != nil {
+		resp.Body.Close()
+		return nil, nil, err
+	}
+	// Close the body immediately after reading - we've already consumed the stream
+	// The response metadata (StatusCode, Header, etc.) is still accessible
+	resp.Body.Close()
 
-	return a.processResponse(resp)
+	return resp, body, nil
 }
 
 // buildPayload creates the request payload and logs it if needed
@@ -255,16 +323,13 @@ func (a *API) createHTTPClient() *http.Client {
 	return client
 }
 
-// processResponse reads the response body, logs it if needed, and validates status code
+// processResponse reads the response body.
+// Note: This no longer validates status codes - the caller can check resp.StatusCode.
+// This allows for custom error handling based on status codes.
 func (a *API) processResponse(resp *http.Response) ([]byte, error) {
-	response, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return nil, fmt.Errorf("unexpected http status: %v", resp.StatusCode)
-	}
-
-	return response, nil
+	return body, nil
 }
