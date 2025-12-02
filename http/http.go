@@ -13,13 +13,6 @@ import (
 // DefaultTimeout is the default timeout for external API calls (30 seconds)
 const DefaultTimeout = 30 * time.Second
 
-// Logger is an optional interface for debug logging.
-// If set, it will be used to log requests and responses in non-production environments.
-type Logger interface {
-	IsProduction() bool
-	LogDebug(label string, data interface{})
-}
-
 // IAPI defines the interface for HTTP client operations.
 // This interface enables dependency injection and makes it easy to mock for unit testing.
 //
@@ -50,7 +43,6 @@ type IAPI interface {
 	SetQueries(queryParams map[string]string) IAPI
 	SetTimeout(timeout time.Duration) IAPI
 	SetInternal() IAPI
-	SetLogger(logger Logger) IAPI
 	POST() ([]byte, error)
 	GET() ([]byte, error)
 	PUT() ([]byte, error)
@@ -65,7 +57,6 @@ type API struct {
 	queryParams map[string]string
 	timeout     time.Duration
 	isInternal  bool
-	logger      Logger
 }
 
 // NewAPI creates a new API instance
@@ -133,12 +124,6 @@ func (a *API) SetInternal() IAPI {
 	return a
 }
 
-// SetLogger sets an optional logger for debug logging
-func (a *API) SetLogger(logger Logger) IAPI {
-	a.logger = logger
-	return a
-}
-
 // POST executes a POST request
 func (a *API) POST() ([]byte, error) {
 	return a.executeRequest(http.MethodPost)
@@ -197,20 +182,12 @@ func (a *API) buildPayload(method string) (io.Reader, error) {
 		return nil, err
 	}
 
-	a.logRequest(jsonBody)
 	return bytes.NewBuffer(jsonBody), nil
 }
 
 // shouldIncludeBody checks if the method supports a request body
 func (a *API) shouldIncludeBody(method string) bool {
 	return a.body != nil && (method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch)
-}
-
-// logRequest logs the request if logger is configured and not in production
-func (a *API) logRequest(jsonBody []byte) {
-	if a.logger != nil && !a.logger.IsProduction() {
-		a.logger.LogDebug("Request API: "+a.url, string(jsonBody))
-	}
 }
 
 // buildRequestURL parses the URL and adds query parameters
@@ -285,20 +262,9 @@ func (a *API) processResponse(resp *http.Response) ([]byte, error) {
 		return nil, err
 	}
 
-	a.logResponse(response)
-
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		return nil, fmt.Errorf("unexpected http status: %v", resp.StatusCode)
 	}
 
 	return response, nil
-}
-
-// logResponse logs the response if logger is configured and not in production
-func (a *API) logResponse(response []byte) {
-	if a.logger != nil && !a.logger.IsProduction() {
-		var responseData interface{}
-		_ = json.Unmarshal(response, &responseData)
-		a.logger.LogDebug("Response API: "+a.url, responseData)
-	}
 }
