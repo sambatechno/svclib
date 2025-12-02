@@ -37,6 +37,7 @@ const (
 	errMsgDELETERequestFailed = "DELETE request failed: %v"
 	errMsgExpectedSuccess     = "Expected success status, got %s"
 	errMsgExpectedCreated     = "Expected created status, got %s"
+	errMsgExpectedStatusCode  = "Expected status code %d, got %d"
 )
 
 func TestNewAPI(t *testing.T) {
@@ -199,7 +200,7 @@ func TestPOSTSuccess(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -243,7 +244,7 @@ func TestGETSuccess(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -277,7 +278,7 @@ func TestPUTSuccess(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -310,7 +311,7 @@ func TestDELETESuccess(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -338,7 +339,7 @@ func TestPOSTHTTPError(t *testing.T) {
 
 	// Verify we got the error status code
 	if resp.StatusCode != http.StatusInternalServerError {
-		t.Errorf("Expected status code %d, got %d", http.StatusInternalServerError, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusInternalServerError, resp.StatusCode)
 	}
 
 	// Verify we got the error body
@@ -398,7 +399,7 @@ func TestPOSTWithCreatedStatus(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusCreated {
-		t.Errorf("Expected status code %d, got %d", http.StatusCreated, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusCreated, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -433,7 +434,7 @@ func TestPOSTWithCustomContentType(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -465,7 +466,7 @@ func TestPOSTWithoutBody(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -505,7 +506,7 @@ func TestPATCHMethod(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -532,7 +533,7 @@ func TestExecuteRequestWithEmptyQueryParams(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -559,7 +560,7 @@ func TestExecuteRequestWithNilBody(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -586,7 +587,7 @@ func TestExecuteRequestWithEmptyHeaders(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -623,7 +624,7 @@ func TestExecuteRequestWithQueryParams(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -664,7 +665,7 @@ func TestExecuteRequestWithBodyAndCustomContentType(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -697,7 +698,7 @@ func TestExecuteRequestWithNilQueryParams(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -734,7 +735,7 @@ func TestExecuteRequestWithBodyButUnsupportedMethod(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -771,7 +772,7 @@ func TestExecuteRequestWithBodyButDELETE(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -897,7 +898,7 @@ func TestTimeoutWithPOSTRequest(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string
@@ -926,7 +927,7 @@ func TestInternalCallWithPOSTRequest(t *testing.T) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("Expected status code %d, got %d", http.StatusOK, resp.StatusCode)
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
 	}
 
 	var result map[string]string

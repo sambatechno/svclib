@@ -16,6 +16,12 @@ const DefaultTimeout = 30 * time.Second
 // ErrUnmarshalJSON is the error message when JSON unmarshaling fails
 const ErrUnmarshalJSON = "failed to unmarshal JSON response: %w"
 
+// ContentTypeHeader is the HTTP Content-Type header name
+const ContentTypeHeader = "Content-Type"
+
+// ContentTypeJSON is the JSON content type value
+const ContentTypeJSON = "application/json"
+
 // IAPI defines the interface for HTTP client operations.
 // This interface enables dependency injection and makes it easy to mock for unit testing.
 //
@@ -42,9 +48,6 @@ const ErrUnmarshalJSON = "failed to unmarshal JSON response: %w"
 //	}
 //
 // For testing, you can create a mock implementation of IAPI.
-//
-// Note: Generic JSON methods (GetJSON, PostJSON, etc.) are available on the concrete API type
-// but cannot be part of the interface due to Go's interface limitations with generics.
 type IAPI interface {
 	SetURL(urlStr string) IAPI
 	SetHeader(key, value string) IAPI
@@ -291,8 +294,8 @@ func (a *API) buildHTTPRequest(method, requestURL string, payload io.Reader) (*h
 
 // setContentTypeIfNeeded sets default content type if not specified and payload exists
 func (a *API) setContentTypeIfNeeded(payload io.Reader) {
-	if _, exists := a.headers["Content-Type"]; !exists && payload != nil {
-		a.headers["Content-Type"] = "application/json"
+	if _, exists := a.headers[ContentTypeHeader]; !exists && payload != nil {
+		a.headers[ContentTypeHeader] = ContentTypeJSON
 	}
 }
 
