@@ -42,9 +42,13 @@ const ContentTypeJSON = "application/json"
 //	    if err != nil {
 //	        return err
 //	    }
-//	    defer resp.Body.Close()
+//	    // Response body is automatically closed after reading
 //	    // Access resp.StatusCode, resp.Header, etc.
-//	    // ...
+//	    if resp.StatusCode != http.StatusOK {
+//	        return fmt.Errorf("unexpected status: %d", resp.StatusCode)
+//	    }
+//	    // Process data...
+//	    return nil
 //	}
 //
 // For testing, you can create a mock implementation of IAPI.
