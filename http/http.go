@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -21,6 +22,9 @@ const ContentTypeHeader = "Content-Type"
 
 // ContentTypeJSON is the JSON content type value
 const ContentTypeJSON = "application/json"
+
+// ContentTypeFormEncoded is the form URL encoded content type value
+const ContentTypeFormEncoded = "application/x-www-form-urlencoded"
 
 // IAPI defines the interface for HTTP client operations.
 // This interface enables dependency injection and makes it easy to mock for unit testing.
@@ -252,12 +256,34 @@ func (a *API) buildPayload(method string) (io.Reader, error) {
 		return nil, nil
 	}
 
+	contentType := a.headers[ContentTypeHeader]
+	if strings.Contains(contentType, ContentTypeFormEncoded) {
+		return a.prepareFormEncodedBody()
+	}
+
 	jsonBody, err := json.Marshal(a.body)
 	if err != nil {
 		return nil, err
 	}
 
 	return bytes.NewBuffer(jsonBody), nil
+}
+
+// prepareFormEncodedBody prepares the body for form-encoded requests
+func (a *API) prepareFormEncodedBody() (io.Reader, error) {
+	switch v := a.body.(type) {
+	case string:
+		return strings.NewReader(v), nil
+	case []byte:
+		return bytes.NewReader(v), nil
+	case io.Reader:
+		return v, nil
+	case url.Values:
+		return strings.NewReader(v.Encode()), nil
+	default:
+		// Fallback for other types: try to convert to string representation
+		return strings.NewReader(fmt.Sprintf("%v", v)), nil
+	}
 }
 
 // shouldIncludeBody checks if the method supports a request body

@@ -2,8 +2,11 @@ package http
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -935,4 +938,134 @@ func TestInternalCallWithPOSTRequest(t *testing.T) {
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
 	}
+}
+
+func TestFormEncodedBody(t *testing.T) {
+	// Create a test server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify Content-Type
+		contentType := r.Header.Get("Content-Type")
+
+		// Read body
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("Failed to read request body: %v", err)
+		}
+		defer r.Body.Close()
+
+		// Handle based on content type
+		if strings.Contains(contentType, "application/x-www-form-urlencoded") {
+			expectedBody := "grant_type=client_credentials"
+			if string(body) != expectedBody {
+				t.Errorf("Expected form body %q, got %q", expectedBody, string(body))
+			}
+		} else if strings.Contains(contentType, "application/json") {
+			var jsonBody map[string]string
+			if err := json.Unmarshal(body, &jsonBody); err != nil {
+				t.Errorf("Failed to unmarshal JSON body: %v", err)
+			}
+			if jsonBody["grant_type"] != "client_credentials" {
+				t.Errorf("Expected JSON body grant_type=client_credentials, got %v", jsonBody)
+			}
+		} else {
+			t.Errorf("Unexpected Content-Type: %s", contentType)
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// Test case 1: String body
+	t.Run("String Body", func(t *testing.T) {
+		api := NewAPI()
+		_, _, err := api.SetURL(server.URL).
+			SetHeader("Content-Type", "application/x-www-form-urlencoded").
+			SetBody("grant_type=client_credentials").
+			POST()
+
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+	})
+
+	// Test case 2: []byte body
+	t.Run("Byte Slice Body", func(t *testing.T) {
+		api := NewAPI()
+		_, _, err := api.SetURL(server.URL).
+			SetHeader("Content-Type", "application/x-www-form-urlencoded").
+			SetBody([]byte("grant_type=client_credentials")).
+			POST()
+
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+	})
+
+	// Test case 3: url.Values body
+	t.Run("url.Values Body", func(t *testing.T) {
+		formData := url.Values{}
+		formData.Set("grant_type", "client_credentials")
+
+		api := NewAPI()
+		_, _, err := api.SetURL(server.URL).
+			SetHeader("Content-Type", "application/x-www-form-urlencoded").
+			SetBody(formData).
+			POST()
+
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+	})
+
+	// Test case 4: io.Reader body
+	t.Run("io.Reader Body", func(t *testing.T) {
+		api := NewAPI()
+		_, _, err := api.SetURL(server.URL).
+			SetHeader("Content-Type", "application/x-www-form-urlencoded").
+			SetBody(strings.NewReader("grant_type=client_credentials")).
+			POST()
+
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+	})
+
+	// Test case 5: JSON backward compatibility
+	t.Run("JSON Backward Compatibility", func(t *testing.T) {
+		api := NewAPI()
+		// No Content-Type set, should default to JSON
+		_, _, err := api.SetURL(server.URL).
+			SetBody(map[string]string{"grant_type": "client_credentials"}).
+			POST()
+
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+	})
+
+	// Test case 6: Content-Type precedence (Explicit JSON)
+	t.Run("Explicit JSON Content-Type", func(t *testing.T) {
+		api := NewAPI()
+		_, _, err := api.SetURL(server.URL).
+			SetHeader("Content-Type", "application/json").
+			SetBody(map[string]string{"grant_type": "client_credentials"}).
+			POST()
+
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+	})
+
+	// Test case 7: Content-Type with charset
+	t.Run("Content-Type with Charset", func(t *testing.T) {
+		api := NewAPI()
+		_, _, err := api.SetURL(server.URL).
+			SetHeader("Content-Type", "application/x-www-form-urlencoded; charset=utf-8").
+			SetBody("grant_type=client_credentials").
+			POST()
+
+		if err != nil {
+			t.Fatalf("Request failed: %v", err)
+		}
+	})
 }

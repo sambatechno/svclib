@@ -311,9 +311,43 @@ go func() {
     err := sendEmail(ctx, user.Email)
     if err != nil {
         svclib.LogError(ctx, "Failed to send email", err)
-    }
+	}
 }()
 ```
+
+---
+
+### HTTP Client
+
+A fluent HTTP client wrapper for making external API calls with built-in JSON and form-encoded support:
+
+```go
+import "github.com/sambatechno/svclib/http"
+
+// JSON Request
+resp, body, err := http.NewAPI().
+    SetURL("https://api.example.com/users").
+    SetHeader("Authorization", "Bearer token").
+    SetBody(map[string]string{"name": "John"}).
+    POST()
+
+// Form-Encoded Request (e.g., OAuth)
+formData := url.Values{}
+formData.Set("grant_type", "client_credentials")
+
+resp, body, err := http.NewAPI().
+    SetURL("https://api.paypal.com/v1/oauth2/token").
+    SetHeader("Content-Type", "application/x-www-form-urlencoded").
+    SetBody(formData). // Automatically encoded
+    POST()
+```
+
+**Features:**
+- Fluent builder pattern
+- Automatic JSON marshaling/unmarshaling
+- Support for `application/x-www-form-urlencoded`
+- Built-in timeout handling (default 30s)
+- Easy mocking with `IAPI` interface
 
 ---
 
