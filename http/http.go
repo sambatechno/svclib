@@ -250,14 +250,23 @@ func (a *API) executeRequest(method string) (*http.Response, []byte, error) {
 	return resp, body, nil
 }
 
-// buildPayload creates the request payload and logs it if needed
+// buildPayload creates the request payload and logs it if needed.
+//
+// Form-encoded (application/x-www-form-urlencoded):
+//   - Body type url.Values is always encoded as form. Caller should set Content-Type.
+//   - Content-Type is matched case-insensitively per HTTP spec.
 func (a *API) buildPayload(method string) (io.Reader, error) {
 	if !a.shouldIncludeBody(method) {
 		return nil, nil
 	}
 
+	// url.Values is the standard type for form data; always encode as form
+	if _, isFormValues := a.body.(url.Values); isFormValues {
+		return a.prepareFormEncodedBody()
+	}
+
 	contentType := a.headers[ContentTypeHeader]
-	if strings.Contains(contentType, ContentTypeFormEncoded) {
+	if strings.Contains(strings.ToLower(contentType), strings.ToLower(ContentTypeFormEncoded)) {
 		return a.prepareFormEncodedBody()
 	}
 
@@ -269,7 +278,8 @@ func (a *API) buildPayload(method string) (io.Reader, error) {
 	return bytes.NewBuffer(jsonBody), nil
 }
 
-// prepareFormEncodedBody prepares the body for form-encoded requests
+// prepareFormEncodedBody prepares the body for form-encoded requests.
+// Supports string, []byte, io.Reader, url.Values, and map[string]string (encoded as key=value&...).
 func (a *API) prepareFormEncodedBody() (io.Reader, error) {
 	switch v := a.body.(type) {
 	case string:
@@ -280,6 +290,12 @@ func (a *API) prepareFormEncodedBody() (io.Reader, error) {
 		return v, nil
 	case url.Values:
 		return strings.NewReader(v.Encode()), nil
+	case map[string]string:
+		vals := make(url.Values, len(v))
+		for k, val := range v {
+			vals.Set(k, val)
+		}
+		return strings.NewReader(vals.Encode()), nil
 	default:
 		// Fallback for other types: try to convert to string representation
 		return strings.NewReader(fmt.Sprintf("%v", v)), nil
