@@ -72,6 +72,11 @@ type IAPI interface {
 	DELETE() (*http.Response, []byte, error)
 }
 
+// Assert at compile time that *API satisfies IAPI. Adding a method to IAPI
+// without implementing it here otherwise fails at whichever call site happens
+// to use it first, which is a long way from the cause.
+var _ IAPI = (*API)(nil)
+
 // API is the HTTP client implementation
 type API struct {
 	url         string

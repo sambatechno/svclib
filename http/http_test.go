@@ -559,7 +559,8 @@ func TestPATCHViaInterface(t *testing.T) {
 	}))
 	defer server.Close()
 
-	var client IAPI = NewAPI()
+	// NewAPI returns IAPI, so this exercises the interface, not *API.
+	client := NewAPI()
 
 	resp, body, err := client.
 		SetURL(server.URL+testPath).
