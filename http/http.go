@@ -68,6 +68,7 @@ type IAPI interface {
 	POST() (*http.Response, []byte, error)
 	GET() (*http.Response, []byte, error)
 	PUT() (*http.Response, []byte, error)
+	PATCH() (*http.Response, []byte, error)
 	DELETE() (*http.Response, []byte, error)
 }
 
@@ -203,6 +204,18 @@ func (a *API) GET() (*http.Response, []byte, error) {
 // The response struct (StatusCode, Header, etc.) remains accessible.
 func (a *API) PUT() (*http.Response, []byte, error) {
 	return a.executeRequest(http.MethodPut)
+}
+
+// PATCH executes a PATCH request and returns the response, body, and error.
+// The response body is automatically closed after reading.
+// The response struct (StatusCode, Header, etc.) remains accessible.
+//
+// PATCH applies a partial modification, where PUT replaces the whole resource.
+// Callers that need partial-update semantics must use this rather than
+// substituting PUT: many APIs treat an unlisted field as "clear it" on PUT and
+// "leave it alone" on PATCH, so the substitution silently drops data.
+func (a *API) PATCH() (*http.Response, []byte, error) {
+	return a.executeRequest(http.MethodPatch)
 }
 
 // DELETE executes a DELETE request and returns the response, body, and error.
