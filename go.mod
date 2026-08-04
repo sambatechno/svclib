@@ -3,8 +3,11 @@ module github.com/sambatechno/svclib
 go 1.24.3
 
 require (
+	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/getsentry/sentry-go v0.38.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.26.1
+	golang.org/x/sync v0.19.0
 	google.golang.org/grpc v1.71.0
 )
 
