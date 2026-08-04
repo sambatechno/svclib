@@ -340,7 +340,18 @@ resp, body, err := http.NewAPI().
     SetHeader("Content-Type", "application/x-www-form-urlencoded").
     SetBody(formData). // Automatically encoded
     POST()
+
+// Partial update. Use PATCH rather than substituting PUT: many APIs treat an
+// unlisted field as "clear it" on PUT and "leave it alone" on PATCH.
+resp, body, err := http.NewAPI().
+    SetURL("https://api.example.com/users/42").
+    SetBody(map[string]string{"name": "Jane"}).
+    PATCH()
 ```
+
+**Verbs:** `GET()`, `POST()`, `PUT()`, `PATCH()`, `DELETE()`. All return
+`(*http.Response, []byte, error)`. `POST`, `PUT` and `PATCH` send the body set
+by `SetBody`; `GET` and `DELETE` ignore it.
 
 **Features:**
 - Fluent builder pattern
@@ -348,6 +359,9 @@ resp, body, err := http.NewAPI().
 - Support for `application/x-www-form-urlencoded`
 - Built-in timeout handling (default 30s)
 - Easy mocking with `IAPI` interface
+
+**Note:** these methods report transport failures only. A 4xx or 5xx comes back
+as a nil error with the response and body, so check `resp.StatusCode` yourself.
 
 ---
 

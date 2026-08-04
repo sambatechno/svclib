@@ -37,6 +37,7 @@ const (
 	errMsgPOSTRequestFailed   = "POST request failed: %v"
 	errMsgGETRequestFailed    = "GET request failed: %v"
 	errMsgPUTRequestFailed    = "PUT request failed: %v"
+	errMsgPATCHRequestFailed  = "PATCH request failed: %v"
 	errMsgDELETERequestFailed = "DELETE request failed: %v"
 	errMsgExpectedSuccess     = "Expected success status, got %s"
 	errMsgExpectedCreated     = "Expected created status, got %s"
@@ -479,7 +480,7 @@ func TestPOSTWithoutBody(t *testing.T) {
 	}
 }
 
-func TestPATCHMethod(t *testing.T) {
+func TestPATCHSuccess(t *testing.T) {
 	// Create a test server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Verify method
@@ -499,13 +500,14 @@ func TestPATCHMethod(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Test PATCH method using executeRequest directly
-	api := NewAPI().(*API) // Cast to concrete type to access executeRequest
-	resp, body, err := api.SetURL(server.URL + "/test").
-		SetBody(map[string]string{testBodyName: testBodyValue}).(*API).executeRequest(http.MethodPatch)
+	// Test API call
+	api := NewAPI()
+	resp, body, err := api.SetURL(server.URL + testPath).
+		SetBody(map[string]string{testBodyName: testBodyValue}).
+		PATCH()
 
 	if err != nil {
-		t.Fatalf("PATCH request failed: %v", err)
+		t.Fatalf(errMsgPATCHRequestFailed, err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -516,6 +518,121 @@ func TestPATCHMethod(t *testing.T) {
 	json.Unmarshal(body, &result)
 	if result["status"] != testStatusSuccess {
 		t.Errorf(errMsgExpectedSuccess, result["status"])
+	}
+}
+
+// PATCH must reach the wire as PATCH. Substituting PUT is not equivalent: many
+// APIs treat an unlisted field as "clear it" on PUT and "leave it alone" on
+// PATCH, so a downgrade silently drops data.
+func TestPATCHIsNotDowngradedToPUT(t *testing.T) {
+	var gotMethod string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	_, _, err := NewAPI().
+		SetURL(server.URL + testPath).
+		SetBody(map[string]string{testBodyName: testBodyValue}).
+		PATCH()
+
+	if err != nil {
+		t.Fatalf(errMsgPATCHRequestFailed, err)
+	}
+
+	if gotMethod != http.MethodPatch {
+		t.Errorf("Expected the server to observe PATCH, got %s", gotMethod)
+	}
+}
+
+// PATCH is reachable through the interface, not just the concrete type, so a
+// caller holding an IAPI (the normal dependency-injection shape) can use it.
+func TestPATCHViaInterface(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			t.Errorf("Expected PATCH method, got %s", r.Method)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "success"}`))
+	}))
+	defer server.Close()
+
+	// NewAPI returns IAPI, so this exercises the interface, not *API.
+	client := NewAPI()
+
+	resp, body, err := client.
+		SetURL(server.URL+testPath).
+		SetHeader(headerAuthorization, testBearerToken).
+		SetBody(map[string]string{testBodyName: testBodyValue}).
+		PATCH()
+
+	if err != nil {
+		t.Fatalf(errMsgPATCHRequestFailed, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf(errMsgExpectedStatusCode, http.StatusOK, resp.StatusCode)
+	}
+
+	var result map[string]string
+	json.Unmarshal(body, &result)
+	if result["status"] != testStatusSuccess {
+		t.Errorf(errMsgExpectedSuccess, result["status"])
+	}
+}
+
+// PATCH honours the form-encoded path the same way POST and PUT do.
+func TestPATCHFormEncodedBody(t *testing.T) {
+	var gotContentType, gotBody string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotContentType = r.Header.Get(headerContentType)
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+
+	_, _, err := NewAPI().
+		SetURL(server.URL+testPath).
+		SetHeader(headerContentType, ContentTypeFormEncoded).
+		SetBody(form).
+		PATCH()
+
+	if err != nil {
+		t.Fatalf(errMsgPATCHRequestFailed, err)
+	}
+
+	if gotContentType != ContentTypeFormEncoded {
+		t.Errorf("Expected Content-Type %s, got %s", ContentTypeFormEncoded, gotContentType)
+	}
+
+	if gotBody != "grant_type=client_credentials" {
+		t.Errorf("Expected form-encoded body, got %s", gotBody)
+	}
+}
+
+// The timeout and internal-call settings apply to PATCH like any other verb.
+func TestPATCHRespectsTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	_, _, err := NewAPI().
+		SetURL(server.URL + testPath).
+		SetTimeout(10 * time.Millisecond).
+		SetBody(map[string]string{testBodyName: testBodyValue}).
+		PATCH()
+
+	if err == nil {
+		t.Fatal("Expected a timeout error, got nil")
 	}
 }
 
