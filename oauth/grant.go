@@ -20,6 +20,9 @@ const (
 const (
 	defaultGrantTTL        = 45 * time.Second
 	defaultGrantStaleGrace = 10 * time.Minute
+	// grantQueryTimeout bounds the revocation DB read. The query runs on a context detached from
+	// the caller's (see Active), so this is what stops a hung DB from holding callers open.
+	grantQueryTimeout = 3 * time.Second
 )
 
 // Queryer is the minimal database seam the GrantChecker needs. It is satisfied as-is by *sql.DB,
@@ -105,7 +108,13 @@ func (g *GrantChecker) Active(ctx context.Context, claims *Claims) (bool, error)
 	}
 
 	v, err, _ := g.group.Do(key, func() (any, error) {
-		status, found, qErr := g.queryStatus(ctx, schema, claims.Subject)
+		// singleflight runs this once and returns the leader's result to every waiter — so the DB
+		// read must NOT ride the leader's request context: a canceled/expired leader would make
+		// healthy waiters see a cancellation error and fail as ErrGrantUnavailable. Detach from the
+		// caller's cancellation (keep its values) and apply our own bound.
+		qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grantQueryTimeout)
+		defer cancel()
+		status, found, qErr := g.queryStatus(qctx, schema, claims.Subject)
 		if qErr != nil {
 			return nil, qErr
 		}

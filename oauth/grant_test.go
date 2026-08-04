@@ -180,6 +180,28 @@ func TestGrant_SingleflightCollapses(t *testing.T) {
 	}
 }
 
+// TestGrant_DetachedFromCallerCancel proves the DB read does not ride the caller's context: an
+// already-canceled caller ctx must NOT turn a healthy grant into ErrGrantUnavailable (the
+// singleflight-leader-cancellation hazard). Without context.WithoutCancel, database/sql would
+// short-circuit on the canceled ctx and the query would never reach the (mocked) DB.
+func TestGrant_DetachedFromCallerCancel(t *testing.T) {
+	gc, mock, done := newMockGC(t)
+	defer done()
+	mock.ExpectQuery(gcQuery).WithArgs("sub_abc").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}).AddRow("active"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // caller already gone
+
+	ok, err := gc.Active(ctx, testClaims())
+	if !ok || err != nil {
+		t.Fatalf("Active with canceled caller ctx = (%v, %v), want (true, nil)", ok, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("query should still have run on the detached ctx: %v", err)
+	}
+}
+
 // fakeClock is a manually-advanced time source for deterministic TTL/grace tests.
 type fakeClock struct {
 	mu sync.Mutex

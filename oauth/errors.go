@@ -18,7 +18,9 @@ var (
 	ErrInsufficientScope = errors.New("oauth: insufficient scope")
 
 	// ErrGrantRevoked is returned when the merchant's grant for this client has been revoked
-	// (or no longer exists). -> 403.
+	// (or no longer exists). Per RFC 6750 a revoked token is invalid_token, so it maps to HTTP
+	// 401 (WWW-Authenticate: Bearer error="invalid_token") / gRPC Unauthenticated — which also
+	// prompts the partner's client to refresh or re-authorize.
 	ErrGrantRevoked = errors.New("oauth: grant revoked")
 
 	// ErrGrantUnavailable is returned when the grant-status check could not be completed (DB

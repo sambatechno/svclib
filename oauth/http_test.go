@@ -101,7 +101,8 @@ func TestHTTP_GrantRevoked401(t *testing.T) {
 	gc := NewGrantChecker(db)
 
 	claims := &Claims{Subject: "sub_abc", Tenant: "qapoints", Scopes: []string{ScopeOrders}}
-	h := Middleware(okVerifier(claims), WithGrantCheck(gc))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	nextCalled := false
+	h := Middleware(okVerifier(claims), WithGrantCheck(gc))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true }))
 
 	w := doReq(h, "Bearer x")
 	if w.Code != http.StatusUnauthorized {
@@ -109,6 +110,12 @@ func TestHTTP_GrantRevoked401(t *testing.T) {
 	}
 	if got := w.Header().Get("WWW-Authenticate"); got != `Bearer error="invalid_token"` {
 		t.Errorf("WWW-Authenticate = %q", got)
+	}
+	if nextCalled {
+		t.Error("handler must not run on a revoked grant")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
 	}
 }
 
@@ -119,7 +126,8 @@ func TestHTTP_GrantUnavailable503(t *testing.T) {
 	gc := NewGrantChecker(db)
 
 	claims := &Claims{Subject: "sub_abc", Tenant: "qapoints", Scopes: []string{ScopeOrders}}
-	h := Middleware(okVerifier(claims), WithGrantCheck(gc))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	nextCalled := false
+	h := Middleware(okVerifier(claims), WithGrantCheck(gc))(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true }))
 
 	w := doReq(h, "Bearer x")
 	if w.Code != http.StatusServiceUnavailable {
@@ -127,6 +135,12 @@ func TestHTTP_GrantUnavailable503(t *testing.T) {
 	}
 	if got := w.Header().Get("WWW-Authenticate"); got != "" {
 		t.Errorf("503 should carry no WWW-Authenticate, got %q", got)
+	}
+	if nextCalled {
+		t.Error("handler must not run when grant status is unavailable")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet: %v", err)
 	}
 }
 
