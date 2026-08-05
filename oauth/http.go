@@ -42,18 +42,21 @@ func WithErrorHandler(h func(w http.ResponseWriter, r *http.Request, err error))
 }
 
 // httpStatus maps a validation error to an HTTP status and the RFC 6750 error code (empty when
-// none applies). Grant-revoked and any other invalid token fall through to invalid_token/401 per
-// RFC 6750 ("expired, revoked, malformed…"), which also nudges the partner's client to refresh.
+// none applies). Grant-revoked is invalid_token/401 per RFC 6750 ("expired, revoked, malformed…").
+// An UNRECOGNIZED error (a custom Verifier, or a bug) is deliberately a 500 — not the client's
+// token being invalid — so callers don't retry-loop on a server-side fault.
 func httpStatus(err error) (status int, code string) {
 	switch {
 	case errors.Is(err, ErrTokenMissing):
 		return http.StatusUnauthorized, ""
+	case errors.Is(err, ErrTokenInvalid), errors.Is(err, ErrGrantRevoked):
+		return http.StatusUnauthorized, "invalid_token"
 	case errors.Is(err, ErrInsufficientScope):
 		return http.StatusForbidden, "insufficient_scope"
 	case errors.Is(err, ErrGrantUnavailable):
 		return http.StatusServiceUnavailable, ""
-	default: // ErrTokenInvalid, ErrGrantRevoked, and anything else
-		return http.StatusUnauthorized, "invalid_token"
+	default:
+		return http.StatusInternalServerError, ""
 	}
 }
 
@@ -62,7 +65,8 @@ func httpStatus(err error) (status int, code string) {
 // never leaked to the caller (it is logged server-side by the service, not here).
 func writeRFC6750(w http.ResponseWriter, err error) {
 	status, code := httpStatus(err)
-	if status != http.StatusServiceUnavailable {
+	// Only the auth challenges (401/403) carry WWW-Authenticate; 503/500 do not.
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		challenge := "Bearer"
 		if code != "" {
 			challenge = `Bearer error="` + code + `"`

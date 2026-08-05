@@ -44,16 +44,18 @@ func bearerFromMetadata(ctx context.Context) string {
 }
 
 // grpcStatus maps a validation error to a gRPC code + coarse, non-leaking message, parallel to
-// httpStatus: insufficient scope -> PermissionDenied, DB-unavailable -> Unavailable, everything
-// else (missing/invalid/revoked) -> Unauthenticated. The specific reason is logged server-side,
-// never returned to the caller.
+// httpStatus: missing/invalid/revoked -> Unauthenticated, insufficient scope -> PermissionDenied,
+// DB-unavailable -> Unavailable, and any UNRECOGNIZED error -> Internal (a server-side fault, not
+// the client's token). The specific reason is logged server-side, never returned to the caller.
 func grpcStatus(err error) (codes.Code, string) {
 	switch {
+	case errors.Is(err, ErrTokenMissing), errors.Is(err, ErrTokenInvalid), errors.Is(err, ErrGrantRevoked):
+		return codes.Unauthenticated, "invalid token"
 	case errors.Is(err, ErrInsufficientScope):
 		return codes.PermissionDenied, "insufficient scope"
 	case errors.Is(err, ErrGrantUnavailable):
 		return codes.Unavailable, "grant status unavailable"
 	default:
-		return codes.Unauthenticated, "invalid token"
+		return codes.Internal, "internal error"
 	}
 }
