@@ -3,7 +3,6 @@ package oauth
 import (
 	"errors"
 	"net/http"
-	"strings"
 )
 
 // Middleware returns net/http middleware that authenticates the request's bearer token before the
@@ -13,15 +12,16 @@ import (
 //	mux.Handle("/service/stream-dsp/v1/locations",
 //	    oauth.Middleware(v, oauth.WithRequiredScopes(oauth.ScopeOrders), oauth.WithGrantCheck(gc))(h))
 //
-// The handler bridges the token's tenant to its own tenant mechanism, e.g.:
+// The handler bridges the token's tenant to whatever tenant mechanism it uses — its own DB-layer
+// key and/or svclib's shared one for Sentry tagging, e.g.:
 //
 //	claims, _ := oauth.ClaimsFrom(r.Context())
-//	ctx := context.WithValue(r.Context(), core.TenantContextKey{}, claims.Tenant)
+//	ctx := svclib.WithTenantID(r.Context(), claims.Tenant) // + the service's own DB tenant key
 func Middleware(v Verifier, opts ...MWOption) func(http.Handler) http.Handler {
 	cfg := newMWConfig(opts)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			claims, err := authorize(r.Context(), v, cfg, bearerToken(r))
+			claims, err := authorize(r.Context(), v, cfg, parseBearer(r.Header.Get("Authorization")))
 			if err != nil {
 				if cfg.errHandler != nil {
 					cfg.errHandler(w, r, err)
@@ -41,20 +41,9 @@ func WithErrorHandler(h func(w http.ResponseWriter, r *http.Request, err error))
 	return func(c *mwConfig) { c.errHandler = h }
 }
 
-// bearerToken extracts the token from "Authorization: Bearer <token>" (scheme case-insensitive).
-// Returns "" when absent, which surfaces as ErrTokenMissing from Verify.
-func bearerToken(r *http.Request) string {
-	const prefix = "Bearer "
-	h := r.Header.Get("Authorization")
-	if len(h) >= len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
-		return strings.TrimSpace(h[len(prefix):])
-	}
-	return ""
-}
-
 // httpStatus maps a validation error to an HTTP status and the RFC 6750 error code (empty when
-// none applies). Grant-revoked is invalid_token/401 per RFC 6750 ("expired, revoked, malformed…"),
-// which also correctly nudges the partner's client to refresh/re-authorize.
+// none applies). Grant-revoked and any other invalid token fall through to invalid_token/401 per
+// RFC 6750 ("expired, revoked, malformed…"), which also nudges the partner's client to refresh.
 func httpStatus(err error) (status int, code string) {
 	switch {
 	case errors.Is(err, ErrTokenMissing):
@@ -63,9 +52,7 @@ func httpStatus(err error) (status int, code string) {
 		return http.StatusForbidden, "insufficient_scope"
 	case errors.Is(err, ErrGrantUnavailable):
 		return http.StatusServiceUnavailable, ""
-	case errors.Is(err, ErrGrantRevoked), errors.Is(err, ErrTokenInvalid):
-		return http.StatusUnauthorized, "invalid_token"
-	default:
+	default: // ErrTokenInvalid, ErrGrantRevoked, and anything else
 		return http.StatusUnauthorized, "invalid_token"
 	}
 }

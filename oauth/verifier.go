@@ -2,7 +2,6 @@ package oauth
 
 import (
 	"context"
-	"crypto/rsa"
 	"errors"
 	"fmt"
 	"strings"
@@ -51,21 +50,27 @@ func NewVerifier(cfg Config) (Verifier, error) {
 	if leeway <= 0 {
 		leeway = defaultLeeway
 	}
-	return &verifier{keys: cfg.Keys, issuer: cfg.Issuer, audience: cfg.Audience, leeway: leeway}, nil
+	// Build the parser once: issuer/audience/leeway and the RS256 pin are fixed at construction, so
+	// there's no reason to rebuild the parser + options on every Verify (the hottest path here).
+	parser := jwt.NewParser(
+		jwt.WithValidMethods([]string{"RS256"}), // pin RS256: blocks alg=none and RS/HS confusion
+		jwt.WithIssuer(cfg.Issuer),              // iss must match
+		jwt.WithAudience(cfg.Audience),          // our audience must be present in aud (membership)
+		jwt.WithLeeway(leeway),                  // clock-skew tolerance
+		jwt.WithExpirationRequired(),            // reject tokens with no exp (fail closed)
+	)
+	return &verifier{keys: cfg.Keys, parser: parser}, nil
 }
 
 type verifier struct {
-	keys     KeySource
-	issuer   string
-	audience string
-	leeway   time.Duration
+	keys   KeySource
+	parser *jwt.Parser
 }
 
 // tokenClaims is the JWT payload we parse. Embedding RegisteredClaims gives iss/sub/exp/iat/nbf
 // and, via ClaimStrings, an aud that is either a JSON string or a JSON array (fosite emits either
 // form). The region/tenant/client_id/scope fields are the read side of what the issuer writes
-// (session.go Extra map + fosite's JWT strategy) — keep the json keys in lockstep with the
-// Claim* constants.
+// (session.go Extra map + fosite's JWT strategy) — keep these json keys in lockstep with it.
 type tokenClaims struct {
 	jwt.RegisteredClaims
 	Region   string `json:"region"`
@@ -81,13 +86,7 @@ func (v *verifier) Verify(_ context.Context, rawToken string) (*Claims, error) {
 	}
 
 	var tc tokenClaims
-	_, err := jwt.ParseWithClaims(rawToken, &tc, v.keyFunc,
-		jwt.WithValidMethods([]string{"RS256"}), // pin RS256: blocks alg=none and RS/HS confusion
-		jwt.WithIssuer(v.issuer),                // iss must match
-		jwt.WithAudience(v.audience),            // our audience must be present in aud (membership)
-		jwt.WithLeeway(v.leeway),                // clock-skew tolerance
-		jwt.WithExpirationRequired(),            // reject tokens with no exp (fail closed)
-	)
+	_, err := v.parser.ParseWithClaims(rawToken, &tc, v.keyFunc)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTokenInvalid, err)
 	}
@@ -117,9 +116,5 @@ func (v *verifier) keyFunc(t *jwt.Token) (interface{}, error) {
 		return nil, fmt.Errorf("unexpected signing method %q", t.Method.Alg())
 	}
 	kid, _ := t.Header["kid"].(string)
-	return v.publicKey(kid)
-}
-
-func (v *verifier) publicKey(kid string) (*rsa.PublicKey, error) {
 	return v.keys.PublicKey(kid)
 }
