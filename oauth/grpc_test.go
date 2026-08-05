@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"google.golang.org/grpc"
@@ -54,6 +55,9 @@ func TestGRPC_CodeMapping(t *testing.T) {
 			metadata.Pairs("authorization", "Bearer bad"), nil, codes.Unauthenticated},
 		{"insufficient-scope", okVerifier(claims),
 			metadata.Pairs("authorization", "Bearer x"), []MWOption{WithRequiredScopes(ScopeOrders)}, codes.PermissionDenied},
+		// Unrecognized verifier error -> Internal, not Unauthenticated (server fault, not bad token).
+		{"unknown-error", verifyFunc(func(context.Context, string) (*Claims, error) { return nil, errors.New("boom") }),
+			metadata.Pairs("authorization", "Bearer x"), nil, codes.Internal},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

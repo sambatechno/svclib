@@ -74,6 +74,8 @@ func TestHTTP_ErrorMapping(t *testing.T) {
 		{"not-bearer", okVerifier(claims), nil, "Basic xyz", 401, "Bearer"},
 		{"invalid", verifyFunc(func(context.Context, string) (*Claims, error) { return nil, ErrTokenInvalid }), nil, "Bearer bad", 401, `Bearer error="invalid_token"`},
 		{"insufficient-scope", okVerifier(&Claims{Subject: "s", Tenant: "t", Scopes: []string{"other"}}), []MWOption{WithRequiredScopes(ScopeOrders)}, "Bearer x", 403, `Bearer error="insufficient_scope"`},
+		// An unrecognized (non-sentinel) verifier error is a server-side fault -> 500, no challenge.
+		{"unknown-error", verifyFunc(func(context.Context, string) (*Claims, error) { return nil, errors.New("boom") }), nil, "Bearer x", 500, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

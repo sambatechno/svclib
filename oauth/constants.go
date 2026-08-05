@@ -6,15 +6,6 @@
 // grant-status revocation check against the same MySQL every service already talks to.
 package oauth
 
-// Custom JWT claim keys. The issuer (middleware-service, session.go) writes region/tenant into the
-// access token's Extra map; every validator reads them from here so issuer and validators cannot
-// drift. scope is the standard OAuth scope claim, kept here for symmetry.
-const (
-	ClaimRegion = "region"
-	ClaimTenant = "tenant"
-	ClaimScope  = "scope"
-)
-
 // Well-known token vocabulary (D-11/D-12), relocated from middleware's provider.go so the issuer
 // and every validator reference one definition. These are the values in use today; new surfaces
 // add their own audience/scope strings without touching this library.

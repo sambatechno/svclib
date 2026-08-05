@@ -127,7 +127,9 @@ func (g *GrantChecker) Active(ctx context.Context, claims *Claims) (bool, error)
 		return status, nil
 	})
 	if err != nil {
-		// DB unreachable: serve a stale-but-recent cached value if we have one.
+		// DB unreachable: serve a stale-but-recent cached value if we have one. The age<=ttl+grace
+		// bound is the real stale limit for a custom WithCache impl; the built-in memCache already
+		// drops entries older than ttl+grace, so for it this is a no-op — kept for custom caches.
 		if val, age, ok := g.cache.Get(key); ok && age <= g.ttl+g.grace {
 			return activeOrRevoked(val)
 		}

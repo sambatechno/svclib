@@ -3,7 +3,6 @@ package oauth
 import (
 	"context"
 	"errors"
-	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -24,7 +23,7 @@ func UnaryServerInterceptor(v Verifier, opts ...MWOption) grpc.UnaryServerInterc
 	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		claims, err := authorize(ctx, v, cfg, bearerFromMetadata(ctx))
 		if err != nil {
-			return nil, status.Error(grpcCode(err), grpcMessage(err))
+			return nil, status.Error(grpcStatus(err))
 		}
 		return handler(withClaims(ctx, claims), req)
 	}
@@ -41,36 +40,22 @@ func bearerFromMetadata(ctx context.Context) string {
 	if len(vals) == 0 {
 		return ""
 	}
-	const prefix = "Bearer "
-	h := vals[0]
-	if len(h) >= len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
-		return strings.TrimSpace(h[len(prefix):])
-	}
-	return ""
+	return parseBearer(vals[0])
 }
 
-// grpcCode maps a validation error to a gRPC status code, parallel to httpStatus: revoked/invalid/
-// missing -> Unauthenticated, insufficient scope -> PermissionDenied, DB-unavailable -> Unavailable.
-func grpcCode(err error) codes.Code {
+// grpcStatus maps a validation error to a gRPC code + coarse, non-leaking message, parallel to
+// httpStatus: missing/invalid/revoked -> Unauthenticated, insufficient scope -> PermissionDenied,
+// DB-unavailable -> Unavailable, and any UNRECOGNIZED error -> Internal (a server-side fault, not
+// the client's token). The specific reason is logged server-side, never returned to the caller.
+func grpcStatus(err error) (codes.Code, string) {
 	switch {
+	case errors.Is(err, ErrTokenMissing), errors.Is(err, ErrTokenInvalid), errors.Is(err, ErrGrantRevoked):
+		return codes.Unauthenticated, "invalid token"
 	case errors.Is(err, ErrInsufficientScope):
-		return codes.PermissionDenied
+		return codes.PermissionDenied, "insufficient scope"
 	case errors.Is(err, ErrGrantUnavailable):
-		return codes.Unavailable
+		return codes.Unavailable, "grant status unavailable"
 	default:
-		return codes.Unauthenticated
-	}
-}
-
-// grpcMessage returns a coarse, non-leaking status message (the specific reason is logged
-// server-side, never returned to the caller).
-func grpcMessage(err error) string {
-	switch {
-	case errors.Is(err, ErrInsufficientScope):
-		return "insufficient scope"
-	case errors.Is(err, ErrGrantUnavailable):
-		return "grant status unavailable"
-	default:
-		return "invalid token"
+		return codes.Internal, "internal error"
 	}
 }

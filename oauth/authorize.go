@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"net/http"
+	"strings"
 )
 
 // mwConfig holds the options shared by the HTTP and gRPC adapters. errHandler is honored only by
@@ -53,4 +54,15 @@ func newMWConfig(opts []MWOption) *mwConfig {
 		o(cfg)
 	}
 	return cfg
+}
+
+// parseBearer extracts the token from an "Authorization: Bearer <token>" value (scheme
+// case-insensitive), shared by the HTTP and gRPC adapters. Returns "" when the value is empty or
+// not a Bearer credential, which surfaces as ErrTokenMissing from Verify.
+func parseBearer(header string) string {
+	const prefix = "Bearer "
+	if len(header) >= len(prefix) && strings.EqualFold(header[:len(prefix)], prefix) {
+		return strings.TrimSpace(header[len(prefix):])
+	}
+	return ""
 }
