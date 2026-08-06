@@ -18,8 +18,8 @@ func SchemeAndBaseDomain(serviceURI string) (scheme, domain string) {
 	}
 	scheme = serviceURI[:i]
 	rest := serviceURI[i+3:]
-	if j := strings.Index(rest, "/"); j >= 0 {
-		rest = rest[:j] // strip path, keep host[:port]
+	if j := strings.IndexAny(rest, "/?#"); j >= 0 {
+		rest = rest[:j] // stop the authority at path/query/fragment; keep host[:port]
 	}
 	domain = strings.TrimPrefix(rest, SubdomainPlaceholder+".")
 	return scheme, domain

@@ -12,6 +12,9 @@ func TestIssuerFromServiceURI(t *testing.T) {
 		{"templated sgp1 no path", "https://{subdomain}.sgp1.samba-technologies.xyz", "https://sgp1.samba-technologies.xyz"},
 		{"no subdomain template", "https://eur1.samba-technologies.xyz/service", "https://eur1.samba-technologies.xyz"},
 		{"http + port", "http://{subdomain}.localhost:8080/x", "http://localhost:8080"},
+		{"query stripped", "https://{subdomain}.eur1.samba-technologies.xyz?x=1", "https://eur1.samba-technologies.xyz"},
+		{"fragment stripped", "https://{subdomain}.eur1.samba-technologies.xyz#f", "https://eur1.samba-technologies.xyz"},
+		{"malformed authority -> empty", "https://?bad", ""},
 		{"no scheme -> empty", "eur1.samba-technologies.xyz", ""},
 		{"empty -> empty", "", ""},
 	}
