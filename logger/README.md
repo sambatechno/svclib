@@ -219,6 +219,9 @@ log.Error("sync failed", nil, err)
 | 6. Several goroutines sharing one bound logger | ✅ | ✅ | ✅ | ✅ tags stay per call |
 | 7. Service that never initialized Sentry | ❌ | ✅ | ⚪ dropped | — |
 
+Cases 2 and 3 are recoverable — see
+[How to keep `tenant_id` in cases 2 and 3](#how-to-keep-tenant_id-in-cases-2-and-3).
+
 ---
 
 ### Case 1 — base case (bound to the request context)
@@ -289,6 +292,157 @@ Identical to case 2. `context.Background()` carries no hub, no span and no
 tenant, so `WithContext` has nothing to read — binding it buys nothing. This is
 the one to avoid: it looks correct at the call site while silently dropping the
 trace.
+
+### How to keep `tenant_id` in cases 2 and 3
+
+Pick by what the goroutine actually has in hand:
+
+| You have | Use | `tenant_id` | `subdomain` | `trace_id` |
+|---|---|---|---|---|
+| No context can reach the goroutine | pass the values, `WithFields` | ✅ | ✅ | ❌ |
+| A fresh context you control | `svclib.WithTenantID` | ✅ | ❌ (add via `WithFields`) | ❌ |
+| The request context, but it gets cancelled | `context.WithoutCancel` | ✅ | ✅ | ✅ |
+| The request context, and the work deserves its own span | `context.WithoutCancel` + `StartSpan` | ✅ | ✅ | ✅ child span |
+
+#### Option A — pass the tenant explicitly, build a new logger there
+
+Use this when the goroutine genuinely cannot be reached by a context: it is
+started from a place that has no handler context, or it runs work whose inputs
+are plain values. Then the tenant travels as an ordinary argument, and the
+goroutine builds its own logger:
+
+```go
+// caller: hands the identifying values over explicitly
+go s.processSyncMenu(request.TenantId, request.Subdomain, request.StoreUuid)
+
+// goroutine: builds its own logger from those values
+func (s *server) processSyncMenu(tenantId, subdomain, storeUuid string) {
+    log := s.Logger.WithFields(map[string]any{
+        "tenant_id":  tenantId,
+        "subdomain":  subdomain,
+        "store_uuid": storeUuid,
+    })
+
+    log.Info("sync started")
+    if err := s.sync(tenantId, storeUuid); err != nil {
+        log.Error("processSyncMenu", nil, err)
+    }
+}
+```
+
+```json
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:38:07Z","data":{"subdomain":"gyg","tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:38:07Z","trace":"error > sync failed: connection refused","data":{"error":"connection refused","subdomain":"gyg","tenant_id":"b9565b91"}}
+```
+
+Sentry: `tags = {subdomain: gyg, tenant_id: b9565b91, transaction: "SharedService > sync failed"}`.
+
+Fields become Sentry tags, so the event stays filterable per tenant. There is
+still no `trace_id` — nothing in this call chain knows about a trace — so treat
+the tenant fields as the correlation key here.
+
+When several functions need the same fields, give the service a small factory
+rather than repeating the map (the kds `orderLog` pattern):
+
+```go
+func (s *server) orderLog(request structs.UpdateStatusOrderRequest) logger.ILogger {
+    return s.Logger.WithFields(map[string]any{
+        "tenant_id":  request.TenantId,
+        "subdomain":  request.Subdomain,
+        "order_uuid": request.OrderUuid,
+    })
+}
+
+go func() {
+    log := s.orderLog(request)
+    log.Error("AcceptOrder", nil, err)
+}()
+```
+
+Do not pass a `logger.ILogger` built for another request into the goroutine
+instead of the values — a logger bound with `WithContext` carries that request's
+trace and tenant, and reusing it elsewhere labels your entries with them.
+
+#### Option B — `svclib.WithTenantID`, when you build the context yourself
+
+```go
+go func() {
+    ctx := svclib.WithTenantID(context.Background(), request.TenantId)
+    log := s.Logger.WithContext(ctx)
+    log.Info("sync started")
+    log.Error("sync failed", nil, err)
+}()
+```
+
+```json
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:38:07Z","data":{"tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:38:07Z","trace":"error in main > 1 > sync failed: connection refused","data":{"error":"connection refused","tenant_id":"b9565b91"}}
+```
+
+Worth it when the same context is already being passed to the database layer,
+which reads the tenant from it too. `WithTenantID` carries **only** the tenant —
+there is no subdomain equivalent, so add that one with `WithFields`. Still no
+trace: a bare `context.Background()` has no hub and no span.
+
+#### Option C — `context.WithoutCancel`, the usual real answer
+
+Most `context.Background()` in a goroutine is there for one reason: the request
+context is cancelled when the handler returns. `context.WithoutCancel` (Go 1.21+)
+solves exactly that — it keeps every value (hub, span, tenant, gRPC metadata)
+and drops only the cancellation:
+
+```go
+detached := context.WithoutCancel(ctx) // take it BEFORE starting the goroutine
+
+go func() {
+    log := s.Logger.WithContext(detached)
+    log.Info("sync started")
+    log.Error("sync failed", nil, err)
+}()
+```
+
+Request span: `trace_id=2fb4533d5eb9f67d55201df20f83aca8 span_id=3b0a72104d4916e9`
+
+```json
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:38:07Z","trace_id":"2fb4533d5eb9f67d55201df20f83aca8","span_id":"3b0a72104d4916e9","data":{"subdomain":"gyg","tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:38:07Z","trace":"error in main > 1 > sync failed: connection refused","trace_id":"2fb4533d5eb9f67d55201df20f83aca8","span_id":"3b0a72104d4916e9","data":{"error":"connection refused","subdomain":"gyg","tenant_id":"b9565b91"}}
+```
+
+```
+request ctx err = context canceled   <- handler already returned
+detached ctx err = <nil>             <- goroutine keeps working
+```
+
+Everything comes back: `tenant_id`, `subdomain` (from the forwarded gRPC
+metadata), `trace_id`, `span_id` and the Cloud Logging trace fields — and the
+Sentry event is tagged `trace_id=2fb4533d…`, i.e. on the request's own trace.
+Because the values survive, the detached context is also the one to hand to
+outbound calls in that goroutine.
+
+#### Option D — `WithoutCancel` + `StartSpan`, for its own span
+
+```go
+detached := context.WithoutCancel(ctx)
+
+go func() {
+    ctx, finish := svclib.StartSpan(detached, "background.processing")
+    defer finish(nil)
+
+    log := s.Logger.WithContext(ctx)
+    log.Info("sync started")
+    log.Error("sync failed", nil, err)
+}()
+```
+
+Request span: `trace_id=a69891eead1c145050a5b5109d085539 span_id=135e718dbd548cf0`
+
+```json
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:38:07Z","trace_id":"a69891eead1c145050a5b5109d085539","span_id":"de52d1a05d2ba923","data":{"subdomain":"gyg","tenant_id":"b9565b91"}}
+```
+
+Same trace, own `span_id` (`de52d1a05d2ba923` vs the request's
+`135e718dbd548cf0`), tenant intact. This is the default choice for background
+work that outlives the handler.
 
 ### Case 4 — goroutine reusing the bound logger
 
@@ -379,8 +533,12 @@ no client, so `Error()` events are dropped silently — and there are no spans, 
 
 ### Rule of thumb
 
-Pass the request context (or the bound logger) down. Bind a new context only
-through `StartSpan`. `WithContext(context.Background())` is never useful.
+Pass the request context (or the bound logger) down. When you reach for
+`context.Background()` because the request context is cancelled, use
+`context.WithoutCancel(ctx)` instead — same values, no cancellation — and wrap
+the goroutine in `StartSpan` when it deserves its own span. Where no context
+exists at all, carry the tenant with `WithFields`. `WithContext(context.Background())`
+is never useful.
 
 ---
 
