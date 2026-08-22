@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/getsentry/sentry-go"
@@ -265,6 +266,65 @@ func TestErrorCapturesOnContextHub(t *testing.T) {
 	}
 	if event.Level != sentry.LevelError {
 		t.Errorf("expected level error, got %s", event.Level)
+	}
+}
+
+func TestErrorTagsAreNotMixedAcrossGoroutines(t *testing.T) {
+	var mu sync.Mutex
+	type event struct{ tag, message string }
+	var events []event
+
+	client, err := sentry.NewClient(sentry.ClientOptions{
+		EnableTracing:    true,
+		TracesSampleRate: 1.0,
+		BeforeSend: func(e *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+			message := ""
+			if len(e.Exception) > 0 {
+				message = e.Exception[0].Value
+			}
+			mu.Lock()
+			events = append(events, event{tag: e.Tags["i"], message: message})
+			mu.Unlock()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("sentry.NewClient: %v", err)
+	}
+	hub := sentry.NewHub(client, sentry.NewScope())
+	ctx := sentry.SetHubOnContext(context.Background(), hub)
+	span := sentry.StartSpan(ctx, "http.server")
+
+	// One logger built per request, then used from many goroutines at once.
+	log := New("TestService").WithContext(span.Context())
+
+	const n = 200
+	// stdout is swapped once around the whole block: captureOutput itself is not
+	// safe to call from several goroutines at the same time.
+	captureOutput(func() {
+		var wg sync.WaitGroup
+		for i := range n {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				log.Error(fmt.Sprintf("op-%d", i), map[string]string{"i": fmt.Sprint(i)}, fmt.Errorf("boom-%d", i))
+			}(i)
+		}
+		wg.Wait()
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != n {
+		t.Fatalf("expected %d events, got %d", n, len(events))
+	}
+	for _, e := range events {
+		if e.tag == "" {
+			t.Fatalf("event lost its tag: %q", e.message)
+		}
+		if !strings.Contains(e.message, "boom-"+e.tag) {
+			t.Fatalf("event tagged i=%s carries another goroutine's error: %q", e.tag, e.message)
+		}
 	}
 }
 

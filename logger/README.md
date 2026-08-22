@@ -115,6 +115,48 @@ go func() {
 log := s.Logger.WithContext(ctx).WithFields(map[string]any{"order_uuid": id})
 ```
 
+### Goroutines and background contexts
+
+A logger bound with `WithContext` keeps the context it was given, so passing it
+into a goroutine or a helper function keeps `trace_id`, `tenant_id` and every
+field — even after the handler returned. The logger only *reads* values from the
+context, so a cancelled request context does not silence or break logging.
+
+```go
+log := s.Logger.WithContext(ctx)
+
+go func() {
+    log.Info("still running after the handler returned") // same trace_id
+    log.Error("async failed", nil, err)                  // reported, same trace
+}()
+```
+
+Concurrent use is safe: each `Error()` reports on its own clone of the hub, so
+tags from one goroutine never land on another goroutine's event.
+
+What *does* lose the trace is starting a fresh context inside the callee:
+
+```go
+func (s *server) sub() {
+    log := s.Logger.WithContext(context.Background()) // ❌ no trace_id, no tenant
+}
+```
+
+There is nothing on `context.Background()` to read: entries lose `trace_id` and
+tenant fields, and `Error()` falls back to the current hub, so the event is no
+longer attached to the request's trace. Pass the request context down, or
+re-scope the goroutine with `StartSpan` when you want its own span:
+
+```go
+go func() {
+    ctx, finish := svclib.StartSpan(ctx, "background.processing")
+    defer finish(nil)
+
+    log := s.Logger.WithContext(ctx) // own span, same trace_id as the request
+    log.Info("working")
+}()
+```
+
 ### WithFields (manual)
 
 For functions without a context (e.g. SharedService order functions):

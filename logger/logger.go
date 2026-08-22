@@ -247,6 +247,24 @@ func (l *Logger) Error(ctx string, tags map[string]string, err error) {
 	l.capture(ctx, tags, errors.New(trace))
 }
 
+// hub returns a private clone of the hub this logger reports on: the context's
+// hub when it is bound to one, the current hub otherwise.
+//
+// The clone matters. A hub owns a single scope stack, so two goroutines sharing
+// one hub push and pop on the same stack: hub.CaptureException then reads
+// whichever scope happens to be on top, and per-call tags land on another
+// goroutine's event. A logger built once per request is routinely used from
+// several goroutines, so each capture gets its own hub — cloning copies the
+// client and scope, so the event still reaches the same Sentry project.
+func (l *Logger) hub() *sentry.Hub {
+	if l.ctx != nil {
+		if hub := sentry.GetHubFromContext(l.ctx); hub != nil {
+			return hub.Clone()
+		}
+	}
+	return sentry.CurrentHub().Clone()
+}
+
 // capture reports captured to Sentry, linked to the logger's trace when it has one.
 func (l *Logger) capture(ctx string, tags map[string]string, captured error) {
 	span := l.span()
@@ -271,19 +289,10 @@ func (l *Logger) capture(ctx string, tags map[string]string, captured error) {
 		scope.SetLevel(sentry.LevelError)
 	}
 
-	if l.ctx != nil {
-		if hub := sentry.GetHubFromContext(l.ctx); hub != nil {
-			hub.WithScope(func(scope *sentry.Scope) {
-				configure(scope)
-				hub.CaptureException(captured)
-			})
-			return
-		}
-	}
-
-	sentry.WithScope(func(scope *sentry.Scope) {
+	hub := l.hub()
+	hub.WithScope(func(scope *sentry.Scope) {
 		configure(scope)
-		sentry.CaptureException(captured)
+		hub.CaptureException(captured)
 	})
 }
 
