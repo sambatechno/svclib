@@ -1,6 +1,10 @@
 package svclib
 
-import "context"
+import (
+	"context"
+
+	"github.com/getsentry/sentry-go"
+)
 
 // TenantContextKey is the standard context key for storing tenant ID across all services.
 // This key should be used consistently for both database queries and Sentry tagging.
@@ -34,3 +38,34 @@ type (
 	// sentryTraceContextKey stores the trace ID string in the context.
 	sentryTraceContextKey struct{}
 )
+
+// SpanFromContext returns the Sentry span attached to ctx, or nil when there is
+// none. It prefers the span stored by UnaryServerInterceptor / StartSpan and
+// falls back to the span Sentry itself keeps on the context, so it works in
+// handlers, in StartSpan bodies and in HTTP middleware alike.
+func SpanFromContext(ctx context.Context) *sentry.Span {
+	if ctx == nil {
+		return nil
+	}
+	if span, ok := ctx.Value(grpcSpanContextKey{}).(*sentry.Span); ok && span != nil {
+		return span
+	}
+	return sentry.SpanFromContext(ctx)
+}
+
+// TraceIDFromContext returns the distributed trace ID for ctx, or "" when the
+// context carries no trace. It reads the current span first and falls back to
+// the trace ID string StartSpan / UnaryServerInterceptor store on the context,
+// which is what survives into a goroutine that only kept the context.
+func TraceIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if span := SpanFromContext(ctx); span != nil {
+		return span.TraceID.String()
+	}
+	if traceID, ok := ctx.Value(sentryTraceContextKey{}).(string); ok {
+		return traceID
+	}
+	return ""
+}
