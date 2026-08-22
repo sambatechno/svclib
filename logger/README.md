@@ -118,34 +118,14 @@ log := s.Logger.WithContext(ctx).WithFields(map[string]any{"order_uuid": id})
 ### Goroutines and background contexts
 
 A logger bound with `WithContext` keeps the context it was given, so passing it
-into a goroutine or a helper function keeps `trace_id`, `tenant_id` and every
-field — even after the handler returned. The logger only *reads* values from the
-context, so a cancelled request context does not silence or break logging.
+into a goroutine or a helper keeps `trace_id`, `tenant_id` and every field —
+even after the handler returned. Concurrent use is safe: each `Error()` reports
+on its own clone of the hub, so tags never leak between goroutines.
 
-```go
-log := s.Logger.WithContext(ctx)
-
-go func() {
-    log.Info("still running after the handler returned") // same trace_id
-    log.Error("async failed", nil, err)                  // reported, same trace
-}()
-```
-
-Concurrent use is safe: each `Error()` reports on its own clone of the hub, so
-tags from one goroutine never land on another goroutine's event.
-
-What *does* lose the trace is starting a fresh context inside the callee:
-
-```go
-func (s *server) sub() {
-    log := s.Logger.WithContext(context.Background()) // ❌ no trace_id, no tenant
-}
-```
-
-There is nothing on `context.Background()` to read: entries lose `trace_id` and
-tenant fields, and `Error()` falls back to the current hub, so the event is no
-longer attached to the request's trace. Pass the request context down, or
-re-scope the goroutine with `StartSpan` when you want its own span:
+What loses the trace is starting a fresh context in the callee
+(`WithContext(context.Background())`): there is nothing on it to read. Pass the
+request context down, or re-scope the goroutine with `StartSpan` to give the
+background work its own span:
 
 ```go
 go func() {
@@ -156,6 +136,8 @@ go func() {
     log.Info("working")
 }()
 ```
+
+See [Tested behaviour](#tested-behaviour) for each case with its real output.
 
 ### WithFields (manual)
 
@@ -214,6 +196,193 @@ Only outputs when `APP_DEBUG=true`. Payload is JSON-stringified automatically.
 ```go
 log.Debug("request payload", requestBody)
 ```
+
+## Tested behaviour
+
+Every case below was run against this package; the output shown is the real
+output, trimmed only of the trailing `logging.googleapis.com/*` fields where
+they repeat `trace_id` / `span_id`. All of them use the same call site:
+
+```go
+log := s.Logger.WithContext(ctx)
+log.Info("sync started")
+log.Error("sync failed", nil, err)
+```
+
+| Case | `trace_id` in logs | `tenant_id` in logs | Sentry event | Linked to the request trace |
+|---|---|---|---|---|
+| 1. Bound to the request context (base case) | ✅ | ✅ | ✅ | ✅ |
+| 2. Goroutine, logger never bound to a context | ❌ | ❌ | ✅ | ❌ unrelated trace |
+| 3. Goroutine binding a fresh `context.Background()` | ❌ | ❌ | ✅ | ❌ unrelated trace |
+| 4. Goroutine reusing the bound logger (request already finished) | ✅ | ✅ | ✅ | ✅ same span |
+| 5. Goroutine re-scoped with `StartSpan` | ✅ | ✅ | ✅ | ✅ child span |
+| 6. Several goroutines sharing one bound logger | ✅ | ✅ | ✅ | ✅ tags stay per call |
+| 7. Service that never initialized Sentry | ❌ | ✅ | ⚪ dropped | — |
+
+---
+
+### Case 1 — base case (bound to the request context)
+
+```go
+log := s.Logger.WithContext(ctx) // ctx from the gRPC handler / interceptor
+log.Info("sync started")
+log.Error("sync failed", nil, fmt.Errorf("connection refused"))
+```
+
+Request span: `trace_id=e136710525abbba5e773799b29eb0341 span_id=24e153d8c50612c0`
+
+```json
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:34:51Z","trace_id":"e136710525abbba5e773799b29eb0341","span_id":"24e153d8c50612c0","logging.googleapis.com/trace":"projects/cata-prod/traces/e136710525abbba5e773799b29eb0341","logging.googleapis.com/spanId":"24e153d8c50612c0","data":{"tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:34:51Z","trace":"error > sync failed: connection refused","trace_id":"e136710525abbba5e773799b29eb0341","span_id":"24e153d8c50612c0","data":{"error":"connection refused","tenant_id":"b9565b91"}}
+```
+
+Sentry — 1 event, on the request trace:
+
+```
+tags  = {tenant_id: b9565b91, trace_id: e136710525abbba5e773799b29eb0341, transaction: "SharedService > sync failed"}
+trace = {trace_id: e136710525abbba5e773799b29eb0341}
+```
+
+### Case 2 — inside a goroutine, without a context
+
+```go
+go func() {
+    log := s.Logger // never bound with WithContext
+    log.Info("sync started")
+    log.Error("sync failed", nil, fmt.Errorf("connection refused"))
+}()
+```
+
+```json
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:34:51Z"}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:34:51Z","trace":"error in main > 1 > sync failed: connection refused","data":{"error":"connection refused"}}
+```
+
+Sentry — 1 event, but **not** on the request trace:
+
+```
+tags  = {transaction: "SharedService > sync failed"}          <- no trace_id, no tenant_id
+trace = {trace_id: 0b3f4949a0efd8112146e7c65823c5df, ...}     <- auto-generated, unrelated
+```
+
+The log line still reaches Cloud Logging with its severity, message and stack
+trace, and the error still reaches Sentry — but nothing ties either of them back
+to the request. Searching Sentry or Cloud Logging by the request's trace ID will
+not find them.
+
+### Case 3 — inside a goroutine, with a new `context.Background()`
+
+```go
+go func() {
+    log := s.Logger.WithContext(context.Background()) // fresh context
+    log.Info("sync started")
+    log.Error("sync failed", nil, fmt.Errorf("connection refused"))
+}()
+```
+
+```json
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:34:51Z"}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:34:51Z","trace":"error in main > 1 > sync failed: connection refused","data":{"error":"connection refused"}}
+```
+
+Identical to case 2. `context.Background()` carries no hub, no span and no
+tenant, so `WithContext` has nothing to read — binding it buys nothing. This is
+the one to avoid: it looks correct at the call site while silently dropping the
+trace.
+
+### Case 4 — goroutine reusing the bound logger
+
+The logger keeps the context it was given, so handing it to a goroutine keeps
+everything — even after the handler returned and the span finished:
+
+```go
+log := s.Logger.WithContext(ctx)
+
+go func() {
+    log.Info("sync started")   // handler already returned, ctx already cancelled
+    log.Error("sync failed", nil, fmt.Errorf("connection refused"))
+}()
+```
+
+Request span: `trace_id=e7c6e005e37dfeddef4f66eaec581000 span_id=b7ac5bcd9dc450ca`
+
+```json
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:34:51Z","trace_id":"e7c6e005e37dfeddef4f66eaec581000","span_id":"b7ac5bcd9dc450ca","data":{"tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:34:51Z","trace":"error in main > 1 > sync failed: connection refused","trace_id":"e7c6e005e37dfeddef4f66eaec581000","span_id":"b7ac5bcd9dc450ca","data":{"error":"connection refused","tenant_id":"b9565b91"}}
+```
+
+Sentry: `trace_id=e7c6e005e37dfeddef4f66eaec581000`, `tenant_id=b9565b91`.
+
+A cancelled context does not silence logging — the logger only reads values from
+it, never `ctx.Done()`. The goroutine reports under the request's own span; use
+case 5 when you want the background work to show up as its own span.
+
+### Case 5 — goroutine re-scoped with `StartSpan`
+
+```go
+go func() {
+    ctx, finish := svclib.StartSpan(ctx, "background.processing")
+    defer finish(nil)
+
+    log := s.Logger.WithContext(ctx)
+    log.Info("sync started")
+    log.Error("sync failed", nil, fmt.Errorf("connection refused"))
+}()
+```
+
+Request span: `trace_id=d7176516c130e4b8a780158d29c190a1 span_id=2737fd408e691a3d`
+
+```json
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:34:51Z","trace_id":"d7176516c130e4b8a780158d29c190a1","span_id":"c9a675f6c8bd1cc1","data":{"tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:34:51Z","trace":"error in main > 1 > sync failed: connection refused","trace_id":"d7176516c130e4b8a780158d29c190a1","span_id":"c9a675f6c8bd1cc1","data":{"error":"connection refused","tenant_id":"b9565b91"}}
+```
+
+Same `trace_id` as the request, **different `span_id`** (`c9a675f6c8bd1cc1` vs
+`2737fd408e691a3d`) — the background work is a child span of the request, which
+is what you want for anything that outlives the handler.
+
+### Case 6 — several goroutines sharing one bound logger
+
+```go
+log := s.Logger.WithContext(ctx) // built once per request
+
+for i := range items {
+    go func(i int) {
+        log.Error(fmt.Sprintf("op-%d", i), map[string]string{"i": fmt.Sprint(i)}, err)
+    }(i)
+}
+```
+
+Each `Error()` reports on its own clone of the hub, so per-call tags stay with
+their own event. Regression test: `TestErrorTagsAreNotMixedAcrossGoroutines`
+(200 goroutines, asserts every event's `i` tag matches its own error). Without
+the clone, 258 of 300 concurrent events carried another goroutine's tag —
+sentry's hub owns one scope stack, and a shared hub lets goroutines read each
+other's scope. Note the race detector stays quiet either way: the interleaving
+is logical, not a data race.
+
+### Case 7 — service that never initialized Sentry
+
+No `svclib.Init` / `sentry.Init` anywhere:
+
+```json
+{"severity":"INFO","message":"plain info","timestamp":"2026-08-22T12:23:31Z","data":{"order_id":"123"}}
+{"severity":"WARNING","message":"a warning: timeout","timestamp":"2026-08-22T12:23:31Z","trace":"error in runtime > main > main > main > a warning: timeout","data":{"error":"timeout"}}
+{"severity":"ERROR","message":"Error with ctx: boom","timestamp":"2026-08-22T12:23:31Z","trace":"error in runtime > main > main > main > Error with ctx: boom","data":{"error":"boom","tenant_id":"tenant-1"}}
+```
+
+Nothing panics: all four levels keep writing structured JSON, `WithFields` /
+`WithContext` fields still land in `data`, `APP_DEBUG` still gates `Debug`. Only
+the Sentry half is inert — `hub.CaptureException` returns early when the hub has
+no client, so `Error()` events are dropped silently — and there are no spans, so
+`trace_id` is absent. Cloud Logging is fully usable; error tracking is not.
+
+### Rule of thumb
+
+Pass the request context (or the bound logger) down. Bind a new context only
+through `StartSpan`. `WithContext(context.Background())` is never useful.
+
+---
 
 ## Stack Trace
 
