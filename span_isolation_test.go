@@ -65,6 +65,24 @@ func TestSpanFromContext_InnermostWins(t *testing.T) {
 		}
 	})
 
+	t.Run("nested StartSpan resolves to the innermost span", func(t *testing.T) {
+		txn := sentry.StartSpan(ctx, "http.server")
+		c := txn.Context()
+
+		c1, f1 := StartSpan(c, "level1")
+		defer f1(nil)
+		c2, f2 := StartSpan(c1, "level2")
+		defer f2(nil)
+
+		level2, _ := c2.Value(grpcSpanContextKey{}).(*sentry.Span)
+		if got := SpanFromContext(c2); got != level2 {
+			t.Errorf("expected level2 (%s), got %s (op %s)", level2.SpanID, got.SpanID, got.Op)
+		}
+		if level1 := SpanFromContext(c1); level1 == nil || level1.SpanID != level2.ParentSpanID {
+			t.Errorf("expected level2 to be a child of level1")
+		}
+	})
+
 	t.Run("detached transaction never captures the request", func(t *testing.T) {
 		grpcSpan := sentry.StartSpan(ctx, "grpc.server")
 		detached := sentry.StartSpan(ctx, "someone.elses.transaction")

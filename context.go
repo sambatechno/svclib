@@ -45,11 +45,17 @@ type (
 // span.Context()) — and the innermost of the two wins:
 //
 //   - only one present: that one
-//   - one is a direct child of the other: the child
-//   - both on the same trace: Sentry's own key (each sentry.StartSpan re-stores
-//     it, so it tracks the innermost span)
-//   - unrelated traces: the interceptor's span, so a detached transaction
-//     someone started on the side never captures the request's logs
+//   - Sentry's key holds a direct child of the span we track: that child
+//     (a plain sentry.StartSpan opened inside the handler)
+//   - otherwise: the interceptor's/StartSpan's span — our own key always
+//     tracks the innermost StartSpan (Sentry's key never advances past the
+//     transaction under nesting, so a same-trace preference would hand back
+//     the outermost span), and a detached foreign transaction must never
+//     capture the request's logs
+//
+// Known limit: a second plain sentry.StartSpan nested inside the first is no
+// longer a direct child of the tracked span and resolves back to it; nest with
+// svclib.StartSpan to keep span-level linkage exact.
 func SpanFromContext(ctx context.Context) *sentry.Span {
 	if ctx == nil {
 		return nil
@@ -61,9 +67,7 @@ func SpanFromContext(ctx context.Context) *sentry.Span {
 		return grpcSpan
 	case grpcSpan == nil || grpcSpan == sentrySpan:
 		return sentrySpan
-	case grpcSpan.ParentSpanID == sentrySpan.SpanID:
-		return grpcSpan
-	case grpcSpan.TraceID == sentrySpan.TraceID:
+	case sentrySpan.ParentSpanID == grpcSpan.SpanID:
 		return sentrySpan
 	default:
 		return grpcSpan
