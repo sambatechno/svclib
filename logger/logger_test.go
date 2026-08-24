@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,17 +17,26 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
+// captureOutput drains the pipe in the background while fn runs: the concurrent
+// tests write more than a pipe buffer holds, and a full pipe would block the
+// logger write instead of returning.
 func captureOutput(fn func()) string {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
+	var buf bytes.Buffer
+	copied := make(chan struct{})
+	go func() {
+		defer close(copied)
+		_, _ = io.Copy(&buf, r)
+	}()
+
 	fn()
 
-	w.Close()
+	_ = w.Close()
+	<-copied
 	os.Stdout = old
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
 	return buf.String()
 }
 
@@ -34,18 +45,27 @@ func captureStderr(fn func()) string {
 	r, w, _ := os.Pipe()
 	os.Stderr = w
 
+	var buf bytes.Buffer
+	copied := make(chan struct{})
+	go func() {
+		defer close(copied)
+		_, _ = io.Copy(&buf, r)
+	}()
+
 	fn()
 
-	w.Close()
+	_ = w.Close()
+	<-copied
 	os.Stderr = old
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
 	return buf.String()
 }
 
-func parseLogEntry(output string) LogEntry {
+func parseLogEntry(t *testing.T, output string) LogEntry {
+	t.Helper()
 	var entry LogEntry
-	json.Unmarshal([]byte(output), &entry)
+	if err := json.Unmarshal([]byte(output), &entry); err != nil {
+		t.Fatalf("parse log entry: %v; output=%q", err, output)
+	}
 	return entry
 }
 
@@ -81,7 +101,7 @@ func TestInfo(t *testing.T) {
 		output := captureOutput(func() {
 			log.Info("hello")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Severity != SeverityInfo {
 			t.Errorf("expected severity INFO, got %s", entry.Severity)
 		}
@@ -97,7 +117,7 @@ func TestInfo(t *testing.T) {
 		output := captureOutput(func() {
 			log.Info("order created", map[string]any{"order_id": "123"})
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Data["order_id"] != "123" {
 			t.Errorf("expected order_id=123, got %v", entry.Data["order_id"])
 		}
@@ -107,7 +127,7 @@ func TestInfo(t *testing.T) {
 		output := captureOutput(func() {
 			log.Info("test", map[string]any{"a": "1"}, map[string]any{"b": "2"})
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Data["a"] != "1" || entry.Data["b"] != "2" {
 			t.Errorf("expected merged data, got %v", entry.Data)
 		}
@@ -117,7 +137,7 @@ func TestInfo(t *testing.T) {
 		output := captureOutput(func() {
 			log.Info("hello")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Trace != "" {
 			t.Errorf("expected empty trace for Info, got %s", entry.Trace)
 		}
@@ -131,7 +151,7 @@ func TestWarn(t *testing.T) {
 		output := captureOutput(func() {
 			log.Warn("slow query", fmt.Errorf("timeout"))
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Severity != SeverityWarning {
 			t.Errorf("expected severity WARNING, got %s", entry.Severity)
 		}
@@ -147,7 +167,7 @@ func TestWarn(t *testing.T) {
 		output := captureOutput(func() {
 			log.Warn("just a warning", nil)
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Severity != SeverityWarning {
 			t.Errorf("expected severity WARNING, got %s", entry.Severity)
 		}
@@ -164,7 +184,7 @@ func TestError(t *testing.T) {
 		output := captureOutput(func() {
 			log.Error("failed", map[string]string{"tenant_id": "abc"}, fmt.Errorf("db error"))
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Severity != SeverityError {
 			t.Errorf("expected severity ERROR, got %s", entry.Severity)
 		}
@@ -180,7 +200,7 @@ func TestError(t *testing.T) {
 		output := captureOutput(func() {
 			log.Error("failed", nil, fmt.Errorf("some error"))
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Severity != SeverityError {
 			t.Errorf("expected severity ERROR, got %s", entry.Severity)
 		}
@@ -190,7 +210,7 @@ func TestError(t *testing.T) {
 		output := captureOutput(func() {
 			log.Error("something", nil, nil)
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Severity != SeverityError {
 			t.Errorf("expected severity ERROR, got %s", entry.Severity)
 		}
@@ -207,7 +227,7 @@ func TestError(t *testing.T) {
 		output := captureOutput(func() {
 			scoped.Error("test", map[string]string{"extra": "tag"}, fmt.Errorf("err"))
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Data["tenant_id"] != "abc-123" {
 			t.Errorf("expected tenant_id in data, got %v", entry.Data)
 		}
@@ -217,7 +237,7 @@ func TestError(t *testing.T) {
 		output := captureOutput(func() {
 			log.Error("my context", nil, fmt.Errorf("fail"))
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if !strings.Contains(entry.Trace, "my context") {
 			t.Errorf("expected trace to contain 'my context', got %s", entry.Trace)
 		}
@@ -267,6 +287,71 @@ func TestErrorCapturesOnContextHub(t *testing.T) {
 	if event.Level != sentry.LevelError {
 		t.Errorf("expected level error, got %s", event.Level)
 	}
+}
+
+type notFoundError struct{ resource string }
+
+func (e *notFoundError) Error() string { return e.resource + " not found" }
+
+func TestErrorReportsTheOriginalError(t *testing.T) {
+	capture := func(fn func(ILogger)) *sentry.Event {
+		t.Helper()
+		var event *sentry.Event
+		client, err := sentry.NewClient(sentry.ClientOptions{
+			BeforeSend: func(e *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+				event = e
+				return nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("sentry.NewClient: %v", err)
+		}
+		ctx := sentry.SetHubOnContext(context.Background(), sentry.NewHub(client, sentry.NewScope()))
+		captureOutput(func() { fn(New("TestService").WithContext(ctx)) })
+		if event == nil {
+			t.Fatal("expected a sentry event")
+		}
+		return event
+	}
+
+	t.Run("keeps the error type and wrapping", func(t *testing.T) {
+		wrapped := fmt.Errorf("loading store: %w", &notFoundError{resource: "store"})
+		event := capture(func(log ILogger) {
+			log.Error("GetStore", nil, wrapped)
+		})
+
+		if len(event.Exception) == 0 {
+			t.Fatal("expected an exception on the event")
+		}
+		// sentry unwinds the wrap chain, innermost first.
+		values := make([]string, 0, len(event.Exception))
+		types := make([]string, 0, len(event.Exception))
+		for _, e := range event.Exception {
+			values = append(values, e.Value)
+			types = append(types, e.Type)
+		}
+		if !slices.Contains(values, "store not found") {
+			t.Errorf("expected the wrapped error to survive, got values %v", values)
+		}
+		if !slices.Contains(types, "*logger.notFoundError") {
+			t.Errorf("expected the error type to survive, got types %v", types)
+		}
+		if event.Extra["stack_trace"] == nil {
+			t.Error("expected the call-stack string to be kept as the stack_trace extra")
+		}
+	})
+
+	t.Run("falls back to the stack trace when err is nil", func(t *testing.T) {
+		event := capture(func(log ILogger) {
+			log.Error("GetStore", nil, nil)
+		})
+		if len(event.Exception) == 0 {
+			t.Fatal("expected an exception on the event")
+		}
+		if !strings.Contains(event.Exception[0].Value, "GetStore") {
+			t.Errorf("expected the stack trace as the reported error, got %q", event.Exception[0].Value)
+		}
+	})
 }
 
 func TestErrorTagsAreNotMixedAcrossGoroutines(t *testing.T) {
@@ -346,7 +431,7 @@ func TestDebug(t *testing.T) {
 		output := captureOutput(func() {
 			log.Debug("payload", map[string]any{"key": "val"})
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Severity != SeverityDebug {
 			t.Errorf("expected severity DEBUG, got %s", entry.Severity)
 		}
@@ -381,7 +466,7 @@ func TestDebug(t *testing.T) {
 		output := captureOutput(func() {
 			log.Debug("bad", make(chan int))
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Data["marshal_error"] == nil {
 			t.Error("expected marshal_error in data")
 		}
@@ -398,7 +483,7 @@ func TestWithFields(t *testing.T) {
 	output := captureOutput(func() {
 		scoped.Info("hello")
 	})
-	entry := parseLogEntry(output)
+	entry := parseLogEntry(t, output)
 	if entry.Data["tenant_id"] != "abc" {
 		t.Errorf("expected tenant_id=abc, got %v", entry.Data["tenant_id"])
 	}
@@ -415,7 +500,7 @@ func TestWithFieldsMerge(t *testing.T) {
 	output := captureOutput(func() {
 		scoped2.Info("hello")
 	})
-	entry := parseLogEntry(output)
+	entry := parseLogEntry(t, output)
 	if entry.Data["a"] != "1" {
 		t.Errorf("expected a=1, got %v", entry.Data["a"])
 	}
@@ -432,7 +517,7 @@ func TestWithFieldsOverride(t *testing.T) {
 	output := captureOutput(func() {
 		scoped2.Info("hello")
 	})
-	entry := parseLogEntry(output)
+	entry := parseLogEntry(t, output)
 	if entry.Data["key"] != "new" {
 		t.Errorf("expected key=new (overridden), got %v", entry.Data["key"])
 	}
@@ -445,7 +530,7 @@ func TestWithFieldsEmpty(t *testing.T) {
 	output := captureOutput(func() {
 		scoped.Info("hello")
 	})
-	entry := parseLogEntry(output)
+	entry := parseLogEntry(t, output)
 	if entry.Data != nil {
 		t.Errorf("expected nil data with empty fields, got %v", entry.Data)
 	}
@@ -458,7 +543,7 @@ func TestWithFieldsKeepsContext(t *testing.T) {
 	output := captureOutput(func() {
 		log.Info("hello")
 	})
-	entry := parseLogEntry(output)
+	entry := parseLogEntry(t, output)
 	if entry.TraceID != traceID {
 		t.Errorf("expected trace_id %s to survive WithFields, got %s", traceID, entry.TraceID)
 	}
@@ -481,7 +566,7 @@ func TestWithContext(t *testing.T) {
 		output := captureOutput(func() {
 			scoped.Info("test")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Data["tenant_id"] != "tenant-123" {
 			t.Errorf("expected tenant_id=tenant-123, got %v", entry.Data["tenant_id"])
 		}
@@ -497,7 +582,7 @@ func TestWithContext(t *testing.T) {
 		output := captureOutput(func() {
 			scoped.Info("test")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Data != nil {
 			t.Errorf("expected nil data, got %v", entry.Data)
 		}
@@ -513,7 +598,7 @@ func TestWithContext(t *testing.T) {
 		output := captureOutput(func() {
 			scoped.Info("test")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Data["tenant_id"] != "tenant-only" {
 			t.Errorf("expected tenant_id=tenant-only, got %v", entry.Data["tenant_id"])
 		}
@@ -529,9 +614,26 @@ func TestWithContext(t *testing.T) {
 		output := captureOutput(func() {
 			scoped.Info("test")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Data["tenant_id"] != "tenant-ctx" {
 			t.Errorf("expected tenant_id=tenant-ctx, got %v", entry.Data["tenant_id"])
+		}
+	})
+
+	t.Run("empty forwarded tenant falls back to the svclib tenant context", func(t *testing.T) {
+		md := metadata.New(map[string]string{"fwd-x-tenant-id": "", "fwd-x-sub-domain": ""})
+		ctx := metadata.NewIncomingContext(svclib.WithTenantID(context.Background(), "tenant-ctx"), md)
+		scoped := log.WithContext(ctx)
+
+		output := captureOutput(func() {
+			scoped.Info("test")
+		})
+		entry := parseLogEntry(t, output)
+		if entry.Data["tenant_id"] != "tenant-ctx" {
+			t.Errorf("expected tenant_id=tenant-ctx, got %v", entry.Data["tenant_id"])
+		}
+		if _, ok := entry.Data["subdomain"]; ok {
+			t.Errorf("expected empty subdomain to be dropped, got %v", entry.Data["subdomain"])
 		}
 	})
 
@@ -543,7 +645,7 @@ func TestWithContext(t *testing.T) {
 		output := captureOutput(func() {
 			scoped.Info("test")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.Data["tenant_id"] != "tenant-md" {
 			t.Errorf("expected tenant_id=tenant-md, got %v", entry.Data["tenant_id"])
 		}
@@ -558,7 +660,7 @@ func TestTraceID(t *testing.T) {
 		output := captureOutput(func() {
 			log.Info("hello")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.TraceID != traceID {
 			t.Errorf("expected trace_id=%s, got %s", traceID, entry.TraceID)
 		}
@@ -571,7 +673,7 @@ func TestTraceID(t *testing.T) {
 		output := captureOutput(func() {
 			New("TestService").Info("hello")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.TraceID != "" {
 			t.Errorf("expected empty trace_id, got %s", entry.TraceID)
 		}
@@ -596,7 +698,7 @@ func TestTraceID(t *testing.T) {
 		output := captureOutput(func() {
 			New("TestService").WithContext(ctx).Info("working")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.TraceID != want {
 			t.Errorf("expected trace_id=%s, got %s", want, entry.TraceID)
 		}
@@ -611,7 +713,7 @@ func TestGCPTraceFields(t *testing.T) {
 		output := captureOutput(func() {
 			New("TestService").WithContext(ctx).Info("hello")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		want := "projects/cata-prod/traces/" + traceID
 		if entry.GCPTrace != want {
 			t.Errorf("expected %s, got %s", want, entry.GCPTrace)
@@ -627,7 +729,7 @@ func TestGCPTraceFields(t *testing.T) {
 		output := captureOutput(func() {
 			New("TestService").WithContext(ctx).Info("hello")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if entry.GCPTrace != "" {
 			t.Errorf("expected no GCP trace field, got %s", entry.GCPTrace)
 		}
@@ -644,7 +746,7 @@ func TestGCPTraceFields(t *testing.T) {
 		output := captureOutput(func() {
 			New("TestService").WithContext(ctx).Info("hello")
 		})
-		entry := parseLogEntry(output)
+		entry := parseLogEntry(t, output)
 		if !strings.Contains(entry.GCPTrace, "projects/from-code/") {
 			t.Errorf("expected override project, got %s", entry.GCPTrace)
 		}
@@ -658,7 +760,7 @@ func TestWithFieldsDoesNotMutateParent(t *testing.T) {
 	output := captureOutput(func() {
 		log.Info("hello")
 	})
-	entry := parseLogEntry(output)
+	entry := parseLogEntry(t, output)
 	if entry.Data != nil {
 		t.Errorf("expected nil data on parent, got %v", entry.Data)
 	}
@@ -671,7 +773,7 @@ func TestFieldsMergedWithCallData(t *testing.T) {
 	output := captureOutput(func() {
 		scoped.Info("test", map[string]any{"order_id": "123"})
 	})
-	entry := parseLogEntry(output)
+	entry := parseLogEntry(t, output)
 	if entry.Data["tenant_id"] != "abc" {
 		t.Errorf("expected tenant_id from fields, got %v", entry.Data["tenant_id"])
 	}

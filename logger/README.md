@@ -17,6 +17,11 @@ carries the distributed `trace_id` / `span_id`, and `Error()` reports on that
 context's Sentry hub and span, so the event lands inside the same trace as the
 request instead of as a free-floating error.
 
+One deliberate difference from kds: Sentry receives the original error rather
+than a synthetic one built from the stack trace, so the error type and unwrap
+chain survive. The stack trace travels as the `stack_trace` extra, and the
+fingerprint is unchanged, so existing issue grouping still holds.
+
 ## Output Format
 
 All logs are written as JSON to stdout, recognized by Cloud Run / Cloud Logging:
@@ -69,7 +74,7 @@ type server struct {
     Logger logger.ILogger
 }
 
-func NewService(...) *server {
+func NewService() *server {
     return &server{
         Logger: logger.New("SharedService"),
     }
@@ -241,7 +246,7 @@ Request span: `trace_id=e136710525abbba5e773799b29eb0341 span_id=24e153d8c50612c
 
 Sentry — 1 event, on the request trace:
 
-```
+```text
 tags  = {tenant_id: b9565b91, trace_id: e136710525abbba5e773799b29eb0341, transaction: "SharedService > sync failed"}
 trace = {trace_id: e136710525abbba5e773799b29eb0341}
 ```
@@ -263,7 +268,7 @@ go func() {
 
 Sentry — 1 event, but **not** on the request trace:
 
-```
+```text
 tags  = {transaction: "SharedService > sync failed"}          <- no trace_id, no tenant_id
 trace = {trace_id: 0b3f4949a0efd8112146e7c65823c5df, ...}     <- auto-generated, unrelated
 ```
@@ -331,11 +336,11 @@ func (s *server) processSyncMenu(tenantId, subdomain, storeUuid string) {
 ```
 
 ```json
-{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:38:07Z","data":{"subdomain":"gyg","tenant_id":"b9565b91"}}
-{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:38:07Z","trace":"error > sync failed: connection refused","data":{"error":"connection refused","subdomain":"gyg","tenant_id":"b9565b91"}}
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T01:57:19Z","data":{"store_uuid":"9f21c3","subdomain":"gyg","tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"processSyncMenu: connection refused","timestamp":"2026-08-24T01:57:19Z","trace":"error > processSyncMenu: connection refused","data":{"error":"connection refused","store_uuid":"9f21c3","subdomain":"gyg","tenant_id":"b9565b91"}}
 ```
 
-Sentry: `tags = {subdomain: gyg, tenant_id: b9565b91, transaction: "SharedService > sync failed"}`.
+Sentry: `tags = {store_uuid: 9f21c3, subdomain: gyg, tenant_id: b9565b91, transaction: "SharedService > processSyncMenu"}`.
 
 Fields become Sentry tags, so the event stays filterable per tenant. There is
 still no `trace_id` — nothing in this call chain knows about a trace — so treat
@@ -389,7 +394,9 @@ trace: a bare `context.Background()` has no hub and no span.
 Most `context.Background()` in a goroutine is there for one reason: the request
 context is cancelled when the handler returns. `context.WithoutCancel` (Go 1.21+)
 solves exactly that — it keeps every value (hub, span, tenant, gRPC metadata)
-and drops only the cancellation:
+while dropping the cancellation, and with it the deadline, the `Done` channel
+and `Err`. Give the goroutine its own bound with `context.WithTimeout` on the
+detached context when the work should not run forever:
 
 ```go
 detached := context.WithoutCancel(ctx) // take it BEFORE starting the goroutine
@@ -408,13 +415,16 @@ Request span: `trace_id=2fb4533d5eb9f67d55201df20f83aca8 span_id=3b0a72104d4916e
 {"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:38:07Z","trace":"error in main > 1 > sync failed: connection refused","trace_id":"2fb4533d5eb9f67d55201df20f83aca8","span_id":"3b0a72104d4916e9","data":{"error":"connection refused","subdomain":"gyg","tenant_id":"b9565b91"}}
 ```
 
-```
+```text
 request ctx err = context canceled   <- handler already returned
 detached ctx err = <nil>             <- goroutine keeps working
 ```
 
 Everything comes back: `tenant_id`, `subdomain` (from the forwarded gRPC
-metadata), `trace_id`, `span_id` and the Cloud Logging trace fields — and the
+metadata), `trace_id`, `span_id` — plus the `logging.googleapis.com/*` fields,
+which appear here because a project ID is configured (see
+[Configuration](#configuration)); without one the entry still carries
+`trace_id`. And the
 Sentry event is tagged `trace_id=2fb4533d…`, i.e. on the request's own trace.
 Because the values survive, the detached context is also the one to hand to
 outbound calls in that goroutine.
@@ -509,8 +519,9 @@ for i := range items {
 
 Each `Error()` reports on its own clone of the hub, so per-call tags stay with
 their own event. Regression test: `TestErrorTagsAreNotMixedAcrossGoroutines`
-(200 goroutines, asserts every event's `i` tag matches its own error). Without
-the clone, 258 of 300 concurrent events carried another goroutine's tag —
+(200 goroutines, asserts every event's `i` tag matches its own error). A
+separate 300-goroutine experiment on the pre-fix code measured the damage:
+258 of those 300 events carried another goroutine's tag —
 sentry's hub owns one scope stack, and a shared hub lets goroutines read each
 other's scope. Note the race detector stays quiet either way: the interleaving
 is logical, not a data race.
@@ -525,8 +536,10 @@ No `svclib.Init` / `sentry.Init` anywhere:
 {"severity":"ERROR","message":"Error with ctx: boom","timestamp":"2026-08-22T12:23:31Z","trace":"error in runtime > main > main > main > Error with ctx: boom","data":{"error":"boom","tenant_id":"tenant-1"}}
 ```
 
-Nothing panics: all four levels keep writing structured JSON, `WithFields` /
-`WithContext` fields still land in `data`, `APP_DEBUG` still gates `Debug`. Only
+Nothing panics: `Info`, `Warn` and `Error` keep writing structured JSON (and so
+does `Debug`, still only when `APP_DEBUG=true` — the run above left it off, which
+is why no DEBUG line appears), `WithFields` / `WithContext` fields still land in
+`data`. Only
 the Sentry half is inert — `hub.CaptureException` returns early when the hub has
 no client, so `Error()` events are dropped silently — and there are no spans, so
 `trace_id` is absent. Cloud Logging is fully usable; error tracking is not.
@@ -592,7 +605,10 @@ service := &server{
 
 `Error()` reports to Sentry with:
 
-- **Stack trace** as the error message — `error in X > Y > Z` format
+- **The error itself** — reported as given, so its type and unwrap chain survive
+  and Sentry groups by real exception data (when `err` is nil, the stack trace
+  becomes the reported error, so the event is still raised)
+- **Stack trace** as the `stack_trace` extra — `error in X > Y > Z` format
 - **Transaction tag**: `{prefix} > {ctx}`
 - **Fingerprint**: `[prefix, ctx]` — prevents merging unrelated errors
 - **Field tags**: everything added via `WithFields` / `WithContext` (tenant_id, subdomain, …)

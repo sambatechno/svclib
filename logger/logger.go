@@ -156,11 +156,13 @@ func (l *Logger) WithFields(fields map[string]any) ILogger {
 func (l *Logger) WithContext(ctx context.Context) ILogger {
 	fields := make(map[string]any)
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
-		if vals := md.Get(metadataTenantID); len(vals) > 0 {
-			fields["tenant_id"] = vals[0]
+		// An empty forwarded value counts as absent: storing "" would both
+		// clutter the entry and shadow the svclib.WithTenantID fallback below.
+		if v := firstNonEmpty(md.Get(metadataTenantID)); v != "" {
+			fields["tenant_id"] = v
 		}
-		if vals := md.Get(metadataSubomain); len(vals) > 0 {
-			fields["subdomain"] = vals[0]
+		if v := firstNonEmpty(md.Get(metadataSubomain)); v != "" {
+			fields["subdomain"] = v
 		}
 	}
 	if _, ok := fields["tenant_id"]; !ok {
@@ -169,6 +171,16 @@ func (l *Logger) WithContext(ctx context.Context) ILogger {
 		}
 	}
 	return &Logger{prefix: l.prefix, fields: mergeMaps(l.fields, fields), ctx: ctx}
+}
+
+// firstNonEmpty returns the first non-empty value, or "" when there is none.
+func firstNonEmpty(values []string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // span returns the span bound to this logger's context, if any.
@@ -241,10 +253,19 @@ func (l *Logger) Warn(ctx string, err error) {
 }
 
 // Error logs a message at ERROR severity with stack trace and reports to Sentry with tags.
+//
+// Sentry receives the error as given, so its type and unwrap chain survive; the
+// call-stack string goes along as the "stack_trace" extra. When err is nil the
+// stack trace itself becomes the reported error, so the event is still raised.
 func (l *Logger) Error(ctx string, tags map[string]string, err error) {
 	trace := buildStackTrace(ctx, err)
 	l.write(SeverityError, errorMsg(ctx, err), trace, errorData(err))
-	l.capture(ctx, tags, errors.New(trace))
+
+	reported := err
+	if reported == nil {
+		reported = errors.New(trace)
+	}
+	l.capture(ctx, tags, reported, trace)
 }
 
 // hub returns a private clone of the hub this logger reports on: the context's
@@ -266,7 +287,7 @@ func (l *Logger) hub() *sentry.Hub {
 }
 
 // capture reports captured to Sentry, linked to the logger's trace when it has one.
-func (l *Logger) capture(ctx string, tags map[string]string, captured error) {
+func (l *Logger) capture(ctx string, tags map[string]string, captured error, trace string) {
 	span := l.span()
 	traceID, _ := l.traceIDs()
 
@@ -285,6 +306,9 @@ func (l *Logger) capture(ctx string, tags map[string]string, captured error) {
 		if traceID != "" {
 			scope.SetTag("trace_id", traceID)
 			scope.SetContext("trace", map[string]any{"trace_id": traceID})
+		}
+		if trace != "" {
+			scope.SetExtra("stack_trace", trace)
 		}
 		scope.SetLevel(sentry.LevelError)
 	}
