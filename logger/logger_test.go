@@ -333,6 +333,9 @@ func TestErrorReportsTheOriginalError(t *testing.T) {
 		if !slices.Contains(values, "store not found") {
 			t.Errorf("expected the wrapped error to survive, got values %v", values)
 		}
+		if !slices.Contains(values, wrapped.Error()) {
+			t.Errorf("expected the outer wrapper to survive, got values %v", values)
+		}
 		if !slices.Contains(types, "*logger.notFoundError") {
 			t.Errorf("expected the error type to survive, got types %v", types)
 		}

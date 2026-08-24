@@ -606,11 +606,13 @@ service := &server{
 `Error()` reports to Sentry with:
 
 - **The error itself** — reported as given, so its type and unwrap chain survive
-  and Sentry groups by real exception data (when `err` is nil, the stack trace
-  becomes the reported error, so the event is still raised)
+  in the event (when `err` is nil, the stack trace becomes the reported error, so
+  the event is still raised). Grouping does not follow from that: the explicit
+  fingerprint below overrides Sentry's default exception-based grouping
 - **Stack trace** as the `stack_trace` extra — `error in X > Y > Z` format
 - **Transaction tag**: `{prefix} > {ctx}`
-- **Fingerprint**: `[prefix, ctx]` — prevents merging unrelated errors
+- **Fingerprint**: `[prefix, ctx]` — overrides default grouping, so every event
+  from the same call site forms one issue and unrelated errors never merge
 - **Field tags**: everything added via `WithFields` / `WithContext` (tenant_id, subdomain, …)
 - **Custom tags**: the `tags` argument
 - **Trace linking**: when the logger is bound to a context, the event is captured
