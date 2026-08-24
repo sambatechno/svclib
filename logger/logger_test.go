@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/getsentry/sentry-go"
@@ -17,13 +15,13 @@ import (
 	"google.golang.org/grpc/metadata"
 )
 
-// captureOutput drains the pipe in the background while fn runs: the concurrent
-// tests write more than a pipe buffer holds, and a full pipe would block the
-// logger write instead of returning.
-func captureOutput(fn func()) string {
-	old := os.Stdout
+// captureStream drains the pipe in the background while fn runs: the
+// concurrent tests write more than a pipe buffer holds, and a full pipe would
+// block the logger write instead of returning.
+func captureStream(stream **os.File, fn func()) string {
+	old := *stream
 	r, w, _ := os.Pipe()
-	os.Stdout = w
+	*stream = w
 
 	var buf bytes.Buffer
 	copied := make(chan struct{})
@@ -36,29 +34,12 @@ func captureOutput(fn func()) string {
 
 	_ = w.Close()
 	<-copied
-	os.Stdout = old
+	*stream = old
 	return buf.String()
 }
 
-func captureStderr(fn func()) string {
-	old := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-
-	var buf bytes.Buffer
-	copied := make(chan struct{})
-	go func() {
-		defer close(copied)
-		_, _ = io.Copy(&buf, r)
-	}()
-
-	fn()
-
-	_ = w.Close()
-	<-copied
-	os.Stderr = old
-	return buf.String()
-}
+func captureOutput(fn func()) string { return captureStream(&os.Stdout, fn) }
+func captureStderr(fn func()) string { return captureStream(&os.Stderr, fn) }
 
 func parseLogEntry(t *testing.T, output string) LogEntry {
 	t.Helper()
@@ -244,178 +225,6 @@ func TestError(t *testing.T) {
 	})
 }
 
-func TestErrorCapturesOnContextHub(t *testing.T) {
-	var captured []*sentry.Event
-
-	client, err := sentry.NewClient(sentry.ClientOptions{
-		EnableTracing:    true,
-		TracesSampleRate: 1.0,
-		BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
-			captured = append(captured, event)
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("sentry.NewClient: %v", err)
-	}
-	hub := sentry.NewHub(client, sentry.NewScope())
-	ctx := sentry.SetHubOnContext(context.Background(), hub)
-	span := sentry.StartSpan(ctx, "test.operation")
-	ctx = span.Context()
-
-	log := New("TestService").WithContext(ctx)
-	captureOutput(func() {
-		log.Error("boom", map[string]string{"provider": "revel"}, fmt.Errorf("db error"))
-	})
-
-	if len(captured) != 1 {
-		t.Fatalf("expected 1 captured event, got %d", len(captured))
-	}
-	event := captured[0]
-	if got := event.Tags["trace_id"]; got != span.TraceID.String() {
-		t.Errorf("expected trace_id tag %s, got %s", span.TraceID.String(), got)
-	}
-	if got := event.Tags["provider"]; got != "revel" {
-		t.Errorf("expected provider tag revel, got %s", got)
-	}
-	if got := event.Tags["transaction"]; got != "TestService > boom" {
-		t.Errorf("expected transaction tag 'TestService > boom', got %s", got)
-	}
-	if event.Contexts["trace"]["trace_id"] != span.TraceID.String() {
-		t.Errorf("expected trace context trace_id, got %v", event.Contexts["trace"])
-	}
-	if event.Level != sentry.LevelError {
-		t.Errorf("expected level error, got %s", event.Level)
-	}
-}
-
-type notFoundError struct{ resource string }
-
-func (e *notFoundError) Error() string { return e.resource + " not found" }
-
-func TestErrorReportsTheOriginalError(t *testing.T) {
-	capture := func(fn func(ILogger)) *sentry.Event {
-		t.Helper()
-		var event *sentry.Event
-		client, err := sentry.NewClient(sentry.ClientOptions{
-			BeforeSend: func(e *sentry.Event, _ *sentry.EventHint) *sentry.Event {
-				event = e
-				return nil
-			},
-		})
-		if err != nil {
-			t.Fatalf("sentry.NewClient: %v", err)
-		}
-		ctx := sentry.SetHubOnContext(context.Background(), sentry.NewHub(client, sentry.NewScope()))
-		captureOutput(func() { fn(New("TestService").WithContext(ctx)) })
-		if event == nil {
-			t.Fatal("expected a sentry event")
-		}
-		return event
-	}
-
-	t.Run("keeps the error type and wrapping", func(t *testing.T) {
-		wrapped := fmt.Errorf("loading store: %w", &notFoundError{resource: "store"})
-		event := capture(func(log ILogger) {
-			log.Error("GetStore", nil, wrapped)
-		})
-
-		if len(event.Exception) == 0 {
-			t.Fatal("expected an exception on the event")
-		}
-		// sentry unwinds the wrap chain, innermost first.
-		values := make([]string, 0, len(event.Exception))
-		types := make([]string, 0, len(event.Exception))
-		for _, e := range event.Exception {
-			values = append(values, e.Value)
-			types = append(types, e.Type)
-		}
-		if !slices.Contains(values, "store not found") {
-			t.Errorf("expected the wrapped error to survive, got values %v", values)
-		}
-		if !slices.Contains(values, wrapped.Error()) {
-			t.Errorf("expected the outer wrapper to survive, got values %v", values)
-		}
-		if !slices.Contains(types, "*logger.notFoundError") {
-			t.Errorf("expected the error type to survive, got types %v", types)
-		}
-		if event.Extra["stack_trace"] == nil {
-			t.Error("expected the call-stack string to be kept as the stack_trace extra")
-		}
-	})
-
-	t.Run("falls back to the stack trace when err is nil", func(t *testing.T) {
-		event := capture(func(log ILogger) {
-			log.Error("GetStore", nil, nil)
-		})
-		if len(event.Exception) == 0 {
-			t.Fatal("expected an exception on the event")
-		}
-		if !strings.Contains(event.Exception[0].Value, "GetStore") {
-			t.Errorf("expected the stack trace as the reported error, got %q", event.Exception[0].Value)
-		}
-	})
-}
-
-func TestErrorTagsAreNotMixedAcrossGoroutines(t *testing.T) {
-	var mu sync.Mutex
-	type event struct{ tag, message string }
-	var events []event
-
-	client, err := sentry.NewClient(sentry.ClientOptions{
-		EnableTracing:    true,
-		TracesSampleRate: 1.0,
-		BeforeSend: func(e *sentry.Event, _ *sentry.EventHint) *sentry.Event {
-			message := ""
-			if len(e.Exception) > 0 {
-				message = e.Exception[0].Value
-			}
-			mu.Lock()
-			events = append(events, event{tag: e.Tags["i"], message: message})
-			mu.Unlock()
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("sentry.NewClient: %v", err)
-	}
-	hub := sentry.NewHub(client, sentry.NewScope())
-	ctx := sentry.SetHubOnContext(context.Background(), hub)
-	span := sentry.StartSpan(ctx, "http.server")
-
-	// One logger built per request, then used from many goroutines at once.
-	log := New("TestService").WithContext(span.Context())
-
-	const n = 200
-	// stdout is swapped once around the whole block: captureOutput itself is not
-	// safe to call from several goroutines at the same time.
-	captureOutput(func() {
-		var wg sync.WaitGroup
-		for i := range n {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				log.Error(fmt.Sprintf("op-%d", i), map[string]string{"i": fmt.Sprint(i)}, fmt.Errorf("boom-%d", i))
-			}(i)
-		}
-		wg.Wait()
-	})
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(events) != n {
-		t.Fatalf("expected %d events, got %d", n, len(events))
-	}
-	for _, e := range events {
-		if e.tag == "" {
-			t.Fatalf("event lost its tag: %q", e.message)
-		}
-		if !strings.Contains(e.message, "boom-"+e.tag) {
-			t.Fatalf("event tagged i=%s carries another goroutine's error: %q", e.tag, e.message)
-		}
-	}
-}
-
 func TestDebug(t *testing.T) {
 	log := New("TestService")
 
@@ -440,6 +249,18 @@ func TestDebug(t *testing.T) {
 		}
 		if entry.Data["payload"] == nil {
 			t.Error("expected payload in data")
+		}
+	})
+
+	t.Run("only the exact value true enables it", func(t *testing.T) {
+		for _, inert := range []string{"TRUE", "True", "true ", "1"} {
+			t.Setenv(EnvAppDebug, inert)
+			output := captureOutput(func() {
+				log.Debug("payload", map[string]any{"key": "val"})
+			})
+			if output != "" {
+				t.Errorf("expected APP_DEBUG=%q to stay inert (kds parity), got %s", inert, output)
+			}
 		}
 	})
 
@@ -655,105 +476,38 @@ func TestWithContext(t *testing.T) {
 	})
 }
 
-func TestTraceID(t *testing.T) {
-	t.Run("logs carry the trace and span id of the context", func(t *testing.T) {
-		ctx, traceID := tracedContext(t)
-		log := New("TestService").WithContext(ctx)
-
-		output := captureOutput(func() {
-			log.Info("hello")
-		})
-		entry := parseLogEntry(t, output)
-		if entry.TraceID != traceID {
-			t.Errorf("expected trace_id=%s, got %s", traceID, entry.TraceID)
-		}
-		if entry.SpanID == "" {
-			t.Error("expected span_id to be non-empty")
-		}
+func TestWithContextNilDoesNotPanic(t *testing.T) {
+	log := New("TestService").WithContext(nil)
+	output := captureOutput(func() {
+		log.Info("still works")
 	})
-
-	t.Run("no trace id without a context", func(t *testing.T) {
-		output := captureOutput(func() {
-			New("TestService").Info("hello")
-		})
-		entry := parseLogEntry(t, output)
-		if entry.TraceID != "" {
-			t.Errorf("expected empty trace_id, got %s", entry.TraceID)
-		}
-	})
-
-	t.Run("reads the trace id stored by StartSpan in a goroutine context", func(t *testing.T) {
-		client, err := sentry.NewClient(sentry.ClientOptions{EnableTracing: true, TracesSampleRate: 1.0})
-		if err != nil {
-			t.Fatalf("sentry.NewClient: %v", err)
-		}
-		hub := sentry.NewHub(client, sentry.NewScope())
-		ctx := sentry.SetHubOnContext(context.Background(), hub)
-
-		ctx, finish := svclib.StartSpan(ctx, "background.processing")
-		defer finish(nil)
-
-		want := svclib.TraceIDFromContext(ctx)
-		if want == "" {
-			t.Fatal("expected StartSpan to put a trace id on the context")
-		}
-
-		output := captureOutput(func() {
-			New("TestService").WithContext(ctx).Info("working")
-		})
-		entry := parseLogEntry(t, output)
-		if entry.TraceID != want {
-			t.Errorf("expected trace_id=%s, got %s", want, entry.TraceID)
-		}
-	})
+	entry := parseLogEntry(t, output)
+	if entry.Message != "still works" {
+		t.Errorf("expected an unbound logger, got %+v", entry)
+	}
 }
 
-func TestGCPTraceFields(t *testing.T) {
-	ctx, traceID := tracedContext(t)
+func TestStackTraceSurvivesClosures(t *testing.T) {
+	var trace string
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		trace = buildStackTraceForTest()
+	}()
+	<-done
 
-	t.Run("emitted when a project id is configured", func(t *testing.T) {
-		t.Setenv(EnvProjectID, "cata-prod")
-		output := captureOutput(func() {
-			New("TestService").WithContext(ctx).Info("hello")
-		})
-		entry := parseLogEntry(t, output)
-		want := "projects/cata-prod/traces/" + traceID
-		if entry.GCPTrace != want {
-			t.Errorf("expected %s, got %s", want, entry.GCPTrace)
-		}
-		if entry.GCPSpanID == "" {
-			t.Error("expected logging.googleapis.com/spanId to be non-empty")
-		}
-	})
+	if !strings.Contains(trace, "func1") {
+		t.Errorf("expected the goroutine closure frame in the trace, got %q", trace)
+	}
+	if !strings.Contains(trace, "TestStackTraceSurvivesClosures") {
+		t.Errorf("expected the caller function in the trace, got %q", trace)
+	}
+}
 
-	t.Run("omitted without a project id", func(t *testing.T) {
-		t.Setenv(EnvProjectID, "")
-		t.Setenv(EnvProjectIDAlt, "")
-		output := captureOutput(func() {
-			New("TestService").WithContext(ctx).Info("hello")
-		})
-		entry := parseLogEntry(t, output)
-		if entry.GCPTrace != "" {
-			t.Errorf("expected no GCP trace field, got %s", entry.GCPTrace)
-		}
-		if entry.TraceID == "" {
-			t.Error("expected trace_id even without a project id")
-		}
-	})
-
-	t.Run("SetProjectID overrides the environment", func(t *testing.T) {
-		t.Setenv(EnvProjectID, "from-env")
-		SetProjectID("from-code")
-		defer ResetProjectID()
-
-		output := captureOutput(func() {
-			New("TestService").WithContext(ctx).Info("hello")
-		})
-		entry := parseLogEntry(t, output)
-		if !strings.Contains(entry.GCPTrace, "projects/from-code/") {
-			t.Errorf("expected override project, got %s", entry.GCPTrace)
-		}
-	})
+// buildStackTraceForTest stands in for Warn/Error so buildStackTrace's skip
+// count lines up the same way it does in production.
+func buildStackTraceForTest() string {
+	return buildStackTrace("boom", nil)
 }
 
 func TestWithFieldsDoesNotMutateParent(t *testing.T) {

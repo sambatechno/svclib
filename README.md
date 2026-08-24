@@ -599,8 +599,16 @@ Issues and pull requests welcome! Please ensure:
 
 ### Unreleased
 - `svclib/logger`: structured Cloud Logging JSON logger (ported from
-  kds-management-service) with trace-ID correlation and trace-linked Sentry reporting
+  kds-management-service) with trace-ID correlation, trace-linked Sentry
+  reporting, and Cloud Logging request-log join fields parsed from the
+  forwarded `X-Cloud-Trace-Context` / `traceparent` header
 - `SpanFromContext` / `TraceIDFromContext` helpers for reading the current trace
+  (innermost-wins across the interceptor's and Sentry's own span keys)
+- `StartSpan` and the server interceptor no longer repoint a shared hub's scope:
+  spans are created against a private hub clone
+- `UnaryServerInterceptor` registers its span under Sentry's own context key
+  (when self-parented), so a plain `sentry.StartSpan(ctx, ...)` in a handler
+  parents onto the request instead of opening a detached transaction
 
 ### v0.1.0 (Initial Release)
 - Sentry initialization

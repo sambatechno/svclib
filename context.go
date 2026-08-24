@@ -40,17 +40,34 @@ type (
 )
 
 // SpanFromContext returns the Sentry span attached to ctx, or nil when there is
-// none. It prefers the span stored by UnaryServerInterceptor / StartSpan and
-// falls back to the span Sentry itself keeps on the context, so it works in
-// handlers, in StartSpan bodies and in HTTP middleware alike.
+// none. A context can carry a span under two keys — the one this package's
+// interceptor/StartSpan store, and Sentry's own (set by sentry.StartSpan /
+// span.Context()) — and the innermost of the two wins:
+//
+//   - only one present: that one
+//   - one is a direct child of the other: the child
+//   - both on the same trace: Sentry's own key (each sentry.StartSpan re-stores
+//     it, so it tracks the innermost span)
+//   - unrelated traces: the interceptor's span, so a detached transaction
+//     someone started on the side never captures the request's logs
 func SpanFromContext(ctx context.Context) *sentry.Span {
 	if ctx == nil {
 		return nil
 	}
-	if span, ok := ctx.Value(grpcSpanContextKey{}).(*sentry.Span); ok && span != nil {
-		return span
+	grpcSpan, _ := ctx.Value(grpcSpanContextKey{}).(*sentry.Span)
+	sentrySpan := sentry.SpanFromContext(ctx)
+	switch {
+	case sentrySpan == nil:
+		return grpcSpan
+	case grpcSpan == nil || grpcSpan == sentrySpan:
+		return sentrySpan
+	case grpcSpan.ParentSpanID == sentrySpan.SpanID:
+		return grpcSpan
+	case grpcSpan.TraceID == sentrySpan.TraceID:
+		return sentrySpan
+	default:
+		return grpcSpan
 	}
-	return sentry.SpanFromContext(ctx)
 }
 
 // TraceIDFromContext returns the distributed trace ID for ctx, or "" when the

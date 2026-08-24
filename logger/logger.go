@@ -9,9 +9,10 @@
 //	log.Error("sync failed", map[string]string{"provider": "revel"}, err)
 //
 // On top of that, every entry logged through a logger carrying a context is
-// stamped with the svclib trace ID (and, when a project ID is configured, the
-// Cloud Logging trace fields), and errors are captured on the hub/span of that
-// context so they land inside the same Sentry trace as the request.
+// stamped with the svclib trace ID (plus the Cloud Logging join fields when the
+// request's platform trace header was forwarded and a project ID is
+// configured), and errors are captured on the hub/span of that context so they
+// land inside the same Sentry trace as the request.
 package logger
 
 import (
@@ -22,6 +23,7 @@ import (
 	"maps"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -45,14 +47,25 @@ const (
 	EnvAppDebug = "APP_DEBUG"
 
 	// EnvProjectID / EnvProjectIDAlt supply the GCP project used to build the
-	// "logging.googleapis.com/trace" field. Without one, entries still carry
-	// trace_id, they just are not linked to Cloud Trace in the log viewer.
+	// "logging.googleapis.com/trace" field from the platform trace parsed out
+	// of the forwarded X-Cloud-Trace-Context / traceparent header. Without a
+	// project (or without the header) entries still carry the Sentry trace_id;
+	// they just are not joined to the platform request log.
 	EnvProjectID    = "GOOGLE_CLOUD_PROJECT"
 	EnvProjectIDAlt = "GCP_PROJECT"
 
 	// gRPC metadata keys forwarded by the gateway, read by WithContext.
-	metadataTenantID = "fwd-x-tenant-id"
-	metadataSubomain = "fwd-x-sub-domain"
+	metadataTenantID  = "fwd-x-tenant-id"
+	metadataSubdomain = "fwd-x-sub-domain"
+)
+
+// Metadata keys that may carry the platform trace header. svclib's
+// DefaultHeaderMatcher forwards unmatched HTTP headers with a "fwd-" prefix;
+// grpc-gateway's own matcher uses "grpcgateway-"; a direct gRPC caller may
+// set the bare key.
+var (
+	cloudTraceContextKeys = []string{"x-cloud-trace-context", "fwd-x-cloud-trace-context", "grpcgateway-x-cloud-trace-context"}
+	traceparentKeys       = []string{"traceparent", "fwd-traceparent", "grpcgateway-traceparent"}
 )
 
 // LogEntry is the structured JSON format recognized by Cloud Run / Cloud Logging.
@@ -81,10 +94,30 @@ type ILogger interface {
 }
 
 // Logger provides structured logging with severity levels for Cloud Run.
+//
+// A logger returned by WithContext is bound to that request: it resolves the
+// trace identifiers, tenant fields and Sentry hub/span at bind time and keeps
+// them for its lifetime. Bind per request — a bound logger cached on a
+// long-lived struct keeps stamping the first request's trace on every later
+// entry and reports errors into that request's (long since finished) Sentry
+// transaction, and nothing at the call site makes that visible.
 type Logger struct {
 	prefix string
 	fields map[string]any
-	ctx    context.Context
+
+	// resolved once, at WithContext time
+	hub        *sentry.Hub
+	span       *sentry.Span
+	traceID    string
+	spanID     string
+	gcpTraceID string
+	gcpSpanID  string
+}
+
+// clone returns a shallow copy; fields maps are never mutated in place.
+func (l *Logger) clone() *Logger {
+	c := *l
+	return &c
 }
 
 // New creates a new Logger with a prefix.
@@ -110,7 +143,9 @@ func debugEnabled() bool {
 	if v := debugOverride.Load(); v != nil {
 		return *v
 	}
-	return strings.EqualFold(strings.TrimSpace(os.Getenv(EnvAppDebug)), "true")
+	// Exact match, same as the kds logger this replaces: values like "TRUE"
+	// that are inert there must stay inert after an import-only migration.
+	return os.Getenv(EnvAppDebug) == "true"
 }
 
 // SetProjectID overrides the GCP project used for the Cloud Logging trace
@@ -143,7 +178,9 @@ func mergeMaps(base, overlay map[string]any) map[string]any {
 
 // WithFields returns a new Logger that includes the given fields in every log entry.
 func (l *Logger) WithFields(fields map[string]any) ILogger {
-	return &Logger{prefix: l.prefix, fields: mergeMaps(l.fields, fields), ctx: l.ctx}
+	c := l.clone()
+	c.fields = mergeMaps(l.fields, fields)
+	return c
 }
 
 // WithContext binds the logger to ctx: every entry then carries the trace ID of
@@ -154,6 +191,11 @@ func (l *Logger) WithFields(fields map[string]any) ILogger {
 // (fwd-x-tenant-id, fwd-x-sub-domain) and, failing that, from the tenant stored
 // on the context by svclib.WithTenantID.
 func (l *Logger) WithContext(ctx context.Context) ILogger {
+	if ctx == nil {
+		return l
+	}
+
+	c := l.clone()
 	fields := make(map[string]any)
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		// An empty forwarded value counts as absent: storing "" would both
@@ -161,16 +203,83 @@ func (l *Logger) WithContext(ctx context.Context) ILogger {
 		if v := firstNonEmpty(md.Get(metadataTenantID)); v != "" {
 			fields["tenant_id"] = v
 		}
-		if v := firstNonEmpty(md.Get(metadataSubomain)); v != "" {
+		if v := firstNonEmpty(md.Get(metadataSubdomain)); v != "" {
 			fields["subdomain"] = v
 		}
+		c.gcpTraceID, c.gcpSpanID = cloudTraceFromMetadata(md)
 	}
 	if _, ok := fields["tenant_id"]; !ok {
 		if tenantID, ok := svclib.GetTenantID(ctx); ok && tenantID != "" {
 			fields["tenant_id"] = tenantID
 		}
 	}
-	return &Logger{prefix: l.prefix, fields: mergeMaps(l.fields, fields), ctx: ctx}
+	c.fields = mergeMaps(l.fields, fields)
+
+	c.hub = sentry.GetHubFromContext(ctx)
+	c.span = svclib.SpanFromContext(ctx)
+	if c.span != nil {
+		c.traceID = c.span.TraceID.String()
+		c.spanID = c.span.SpanID.String()
+	} else {
+		c.traceID = svclib.TraceIDFromContext(ctx)
+		c.spanID = ""
+	}
+	return c
+}
+
+// cloudTraceFromMetadata extracts the platform trace from a forwarded
+// X-Cloud-Trace-Context ("TRACE_ID/SPAN_ID;o=1", decimal span) or W3C
+// traceparent ("00-traceid-spanid-flags") header. This — not the Sentry trace
+// ID — is what Cloud Logging joins on for the logging.googleapis.com fields.
+func cloudTraceFromMetadata(md metadata.MD) (traceID, spanID string) {
+	for _, key := range cloudTraceContextKeys {
+		v := firstNonEmpty(md.Get(key))
+		if v == "" {
+			continue
+		}
+		if i := strings.IndexByte(v, ';'); i >= 0 {
+			v = v[:i]
+		}
+		tid, sid, _ := strings.Cut(v, "/")
+		if !isHexTraceID(tid) {
+			continue
+		}
+		if n, err := strconv.ParseUint(sid, 10, 64); err == nil && n > 0 {
+			return strings.ToLower(tid), fmt.Sprintf("%016x", n)
+		}
+		return strings.ToLower(tid), ""
+	}
+	for _, key := range traceparentKeys {
+		v := firstNonEmpty(md.Get(key))
+		if v == "" {
+			continue
+		}
+		parts := strings.Split(v, "-")
+		if len(parts) >= 4 && isHexTraceID(parts[1]) {
+			return strings.ToLower(parts[1]), strings.ToLower(parts[2])
+		}
+	}
+	return "", ""
+}
+
+// isHexTraceID reports whether s is a 32-char lowercase-insensitive hex trace
+// ID that is not all zeros (the W3C invalid value).
+func isHexTraceID(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	nonZero := false
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9':
+			nonZero = nonZero || r != '0'
+		case r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+			nonZero = true
+		default:
+			return false
+		}
+	}
+	return nonZero
 }
 
 // firstNonEmpty returns the first non-empty value, or "" when there is none.
@@ -183,46 +292,39 @@ func firstNonEmpty(values []string) string {
 	return ""
 }
 
-// span returns the span bound to this logger's context, if any.
-func (l *Logger) span() *sentry.Span {
-	if l.ctx == nil {
-		return nil
-	}
-	return svclib.SpanFromContext(l.ctx)
-}
-
-// traceIDs returns the trace ID and span ID carried by this logger's context.
-func (l *Logger) traceIDs() (traceID, spanID string) {
-	if l.ctx == nil {
-		return "", ""
-	}
-	if span := l.span(); span != nil {
-		return span.TraceID.String(), span.SpanID.String()
-	}
-	return svclib.TraceIDFromContext(l.ctx), ""
-}
-
 func (l *Logger) write(severity Severity, msg string, trace string, data map[string]any) {
 	merged := mergeMaps(l.fields, data)
-	traceID, spanID := l.traceIDs()
 	entry := LogEntry{
 		Severity: severity,
 		Message:  msg,
-		Time:     time.Now().UTC().Format(time.RFC3339),
+		Time:     time.Now().UTC().Format(time.RFC3339Nano),
 		Trace:    trace,
-		TraceID:  traceID,
-		SpanID:   spanID,
+		TraceID:  l.traceID,
+		SpanID:   l.spanID,
 		Data:     merged,
 	}
-	if traceID != "" {
+	// The Cloud Logging join fields carry the platform trace parsed from the
+	// forwarded request header — never the Sentry trace ID, which Cloud Logging
+	// could not match against the platform request log.
+	if l.gcpTraceID != "" {
 		if project := projectID(); project != "" {
-			entry.GCPTrace = fmt.Sprintf("projects/%s/traces/%s", project, traceID)
-			entry.GCPSpanID = spanID
+			entry.GCPTrace = fmt.Sprintf("projects/%s/traces/%s", project, l.gcpTraceID)
+			entry.GCPSpanID = l.gcpSpanID
 		}
 	}
 	b, err := json.Marshal(entry)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, `{"severity":"ERROR","message":"failed to marshal log entry: %v"}`+"\n", err)
+		// Marshal the fallback too: interpolating the error text into a JSON
+		// template by hand breaks the JSON when that text contains a quote or
+		// newline (json.MarshalerError embeds the offending value verbatim).
+		fallback := LogEntry{
+			Severity: SeverityError,
+			Message:  "failed to marshal log entry: " + err.Error(),
+			Time:     entry.Time,
+		}
+		if fb, ferr := json.Marshal(fallback); ferr == nil {
+			fmt.Fprintln(os.Stderr, string(fb))
+		}
 		return
 	}
 	fmt.Fprintln(os.Stdout, string(b))
@@ -268,8 +370,8 @@ func (l *Logger) Error(ctx string, tags map[string]string, err error) {
 	l.capture(ctx, tags, reported, trace)
 }
 
-// hub returns a private clone of the hub this logger reports on: the context's
-// hub when it is bound to one, the current hub otherwise.
+// captureHub returns a private clone of the hub this logger reports on: the
+// bound request's hub when it has one, the current hub otherwise.
 //
 // The clone matters. A hub owns a single scope stack, so two goroutines sharing
 // one hub push and pop on the same stack: hub.CaptureException then reads
@@ -277,19 +379,17 @@ func (l *Logger) Error(ctx string, tags map[string]string, err error) {
 // goroutine's event. A logger built once per request is routinely used from
 // several goroutines, so each capture gets its own hub — cloning copies the
 // client and scope, so the event still reaches the same Sentry project.
-func (l *Logger) hub() *sentry.Hub {
-	if l.ctx != nil {
-		if hub := sentry.GetHubFromContext(l.ctx); hub != nil {
-			return hub.Clone()
-		}
+func (l *Logger) captureHub() *sentry.Hub {
+	if l.hub != nil {
+		return l.hub.Clone()
 	}
 	return sentry.CurrentHub().Clone()
 }
 
 // capture reports captured to Sentry, linked to the logger's trace when it has one.
 func (l *Logger) capture(ctx string, tags map[string]string, captured error, trace string) {
-	span := l.span()
-	traceID, _ := l.traceIDs()
+	span := l.span
+	traceID := l.traceID
 
 	configure := func(scope *sentry.Scope) {
 		scope.SetTag("transaction", fmt.Sprintf("%s > %s", l.prefix, ctx))
@@ -313,7 +413,7 @@ func (l *Logger) capture(ctx string, tags map[string]string, captured error, tra
 		scope.SetLevel(sentry.LevelError)
 	}
 
-	hub := l.hub()
+	hub := l.captureHub()
 	hub.WithScope(func(scope *sentry.Scope) {
 		configure(scope)
 		hub.CaptureException(captured)
@@ -334,6 +434,28 @@ func (l *Logger) Debug(ctx string, req any) {
 	}
 
 	l.write(SeverityDebug, ctx, "", map[string]any{"payload": json.RawMessage(reqJSON)})
+}
+
+// traceBoundaryPrefixes mark where the application's call chain ends and the
+// framework's begins. Matching on the fully-qualified prefix — not a substring
+// — keeps application closures (pkg.Fn.func1) and packages that merely contain
+// "proto" or "http" in their name inside the trace.
+var traceBoundaryPrefixes = []string{
+	"net/http.",
+	"google.golang.org/grpc",
+	"github.com/grpc-ecosystem/grpc-gateway",
+	"google.golang.org/protobuf",
+	"runtime.",
+	"testing.",
+}
+
+func isTraceBoundary(function string) bool {
+	for _, prefix := range traceBoundaryPrefixes {
+		if strings.HasPrefix(function, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // buildStackTrace walks the call stack and produces a trace string like:
@@ -358,9 +480,7 @@ func buildStackTrace(ctx string, err error) string {
 		if !more {
 			break
 		}
-		if strings.Contains(f.Function, "net/http") ||
-			strings.Contains(f.Function, "func1") ||
-			strings.Contains(f.Function, "proto") {
+		if isTraceBoundary(f.Function) {
 			break
 		}
 		// f.Function: "project/service/SharedService.(*server).AcceptOrder"
@@ -369,10 +489,15 @@ func buildStackTrace(ctx string, err error) string {
 		if dotIdx < 0 {
 			continue
 		}
-		frames = append(frames, frame{
-			pkg: short[:dotIdx],
-			fn:  short[strings.LastIndex(short, ".")+1:],
-		})
+		fn := short[dotIdx+1:]
+		// Drop a method receiver ("(*server).AcceptOrder" -> "AcceptOrder") but
+		// keep closure suffixes ("AcceptOrder.func1") — they name real frames.
+		if strings.HasPrefix(fn, "(") {
+			if end := strings.Index(fn, ")."); end >= 0 {
+				fn = fn[end+2:]
+			}
+		}
+		frames = append(frames, frame{pkg: short[:dotIdx], fn: fn})
 	}
 
 	if len(frames) == 0 {

@@ -17,10 +17,19 @@ carries the distributed `trace_id` / `span_id`, and `Error()` reports on that
 context's Sentry hub and span, so the event lands inside the same trace as the
 request instead of as a free-floating error.
 
-One deliberate difference from kds: Sentry receives the original error rather
-than a synthetic one built from the stack trace, so the error type and unwrap
-chain survive. The stack trace travels as the `stack_trace` extra, and the
-fingerprint is unchanged, so existing issue grouping still holds.
+Deliberate differences from kds:
+
+- Sentry receives the original error rather than a synthetic one built from the
+  stack trace, so the error type and unwrap chain survive. The stack trace
+  travels as the `stack_trace` extra, and the fingerprint is unchanged, so
+  existing issue grouping still holds.
+- The `logging.googleapis.com/trace` fields carry the **platform trace** parsed
+  from the forwarded `X-Cloud-Trace-Context` / `traceparent` request header —
+  never the Sentry trace ID, which Cloud Logging could not join against the
+  request log. Without that header the fields are omitted; `trace_id` (Sentry)
+  is always there.
+- `APP_DEBUG` is an exact match on `"true"`, same as kds — values like `TRUE`
+  that are inert there stay inert here.
 
 ## Output Format
 
@@ -30,12 +39,12 @@ All logs are written as JSON to stdout, recognized by Cloud Run / Cloud Logging:
 {
   "severity": "ERROR",
   "message": "SharedService: capturePayment",
-  "timestamp": "2026-03-25T10:00:00Z",
+  "timestamp": "2026-03-25T10:00:00.599334168Z",
   "trace": "error in SharedService > CompleteOrder > capturePayment > ...: unexpected http status: 520",
   "trace_id": "d4cda95b652f4a1592b449d5929fda1b",
   "span_id": "1e5e29a5b4b9c1f2",
-  "logging.googleapis.com/trace": "projects/cata-prod/traces/d4cda95b652f4a1592b449d5929fda1b",
-  "logging.googleapis.com/spanId": "1e5e29a5b4b9c1f2",
+  "logging.googleapis.com/trace": "projects/cata-prod/traces/105445aa7843bc8bf206b12000100000",
+  "logging.googleapis.com/spanId": "000000000000004a",
   "data": {
     "tenant_id": "b9565b91-...",
     "subdomain": "gyg",
@@ -49,7 +58,7 @@ All logs are written as JSON to stdout, recognized by Cloud Run / Cloud Logging:
 |---|---|
 | `trace` | Application **stack trace** — `error in A > B > ctx: err`. |
 | `trace_id` / `span_id` | **Distributed trace** identifiers, shared with Sentry. |
-| `logging.googleapis.com/trace` / `spanId` | Cloud Logging correlation; emitted only when a project ID is configured. |
+| `logging.googleapis.com/trace` / `spanId` | Cloud Logging request-log correlation — the **platform trace** parsed from the forwarded `X-Cloud-Trace-Context` / `traceparent` header; emitted only when that header is present *and* a project ID is configured. |
 
 The `severity` field maps directly to Cloud Logging levels:
 
@@ -237,18 +246,24 @@ log.Info("sync started")
 log.Error("sync failed", nil, fmt.Errorf("connection refused"))
 ```
 
-Request span: `trace_id=e136710525abbba5e773799b29eb0341 span_id=24e153d8c50612c0`
+Request span: `trace_id=639e412338420a0e0212a6dc9dde649d span_id=4660e7af6efed661`, request
+carrying `X-Cloud-Trace-Context: 105445aa7843bc8bf206b12000100000/74;o=1`:
 
 ```json
-{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:34:51Z","trace_id":"e136710525abbba5e773799b29eb0341","span_id":"24e153d8c50612c0","logging.googleapis.com/trace":"projects/cata-prod/traces/e136710525abbba5e773799b29eb0341","logging.googleapis.com/spanId":"24e153d8c50612c0","data":{"tenant_id":"b9565b91"}}
-{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:34:51Z","trace":"error > sync failed: connection refused","trace_id":"e136710525abbba5e773799b29eb0341","span_id":"24e153d8c50612c0","data":{"error":"connection refused","tenant_id":"b9565b91"}}
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T07:46:20.599334168Z","trace_id":"639e412338420a0e0212a6dc9dde649d","span_id":"4660e7af6efed661","logging.googleapis.com/trace":"projects/cata-prod/traces/105445aa7843bc8bf206b12000100000","logging.googleapis.com/spanId":"000000000000004a","data":{"tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-24T07:46:20.599425865Z","trace":"error in main > main > run > main.func1 > sync failed: connection refused","trace_id":"639e412338420a0e0212a6dc9dde649d","span_id":"4660e7af6efed661","logging.googleapis.com/trace":"projects/cata-prod/traces/105445aa7843bc8bf206b12000100000","logging.googleapis.com/spanId":"000000000000004a","data":{"error":"connection refused","tenant_id":"b9565b91"}}
 ```
+
+Note the two trace identities: `trace_id` is the Sentry trace; the
+`logging.googleapis.com/*` fields carry the platform trace from the forwarded
+header (decimal span `74` re-encoded as hex), which is what Cloud Logging joins
+against the request log.
 
 Sentry — 1 event, on the request trace:
 
 ```text
-tags  = {tenant_id: b9565b91, trace_id: e136710525abbba5e773799b29eb0341, transaction: "SharedService > sync failed"}
-trace = {trace_id: e136710525abbba5e773799b29eb0341}
+tags  = {tenant_id: b9565b91, trace_id: 639e412338420a0e0212a6dc9dde649d, transaction: "SharedService > sync failed"}
+trace = {trace_id: 639e412338420a0e0212a6dc9dde649d}
 ```
 
 ### Case 2 — inside a goroutine, without a context
@@ -262,15 +277,15 @@ go func() {
 ```
 
 ```json
-{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:34:51Z"}
-{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:34:51Z","trace":"error in main > 1 > sync failed: connection refused","data":{"error":"connection refused"}}
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T07:46:20.601790223Z"}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-24T07:46:20.601822718Z","trace":"error in main > main.func2.1 > sync failed: connection refused","data":{"error":"connection refused"}}
 ```
 
 Sentry — 1 event, but **not** on the request trace:
 
 ```text
 tags  = {transaction: "SharedService > sync failed"}          <- no trace_id, no tenant_id
-trace = {trace_id: 0b3f4949a0efd8112146e7c65823c5df, ...}     <- auto-generated, unrelated
+trace = {trace_id: a1db116052978b0ae20c2af9094fec1d, ...}     <- auto-generated, unrelated
 ```
 
 The log line still reaches Cloud Logging with its severity, message and stack
@@ -289,8 +304,8 @@ go func() {
 ```
 
 ```json
-{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:34:51Z"}
-{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:34:51Z","trace":"error in main > 1 > sync failed: connection refused","data":{"error":"connection refused"}}
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T07:46:20.604029574Z"}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-24T07:46:20.604044151Z","trace":"error in main > main.func3.1 > sync failed: connection refused","data":{"error":"connection refused"}}
 ```
 
 Identical to case 2. `context.Background()` carries no hub, no span and no
@@ -336,8 +351,8 @@ func (s *server) processSyncMenu(tenantId, subdomain, storeUuid string) {
 ```
 
 ```json
-{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T01:57:19Z","data":{"store_uuid":"9f21c3","subdomain":"gyg","tenant_id":"b9565b91"}}
-{"severity":"ERROR","message":"processSyncMenu: connection refused","timestamp":"2026-08-24T01:57:19Z","trace":"error > processSyncMenu: connection refused","data":{"error":"connection refused","store_uuid":"9f21c3","subdomain":"gyg","tenant_id":"b9565b91"}}
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T07:46:43.379820307Z","data":{"store_uuid":"9f21c3","subdomain":"gyg","tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"processSyncMenu: connection refused","timestamp":"2026-08-24T07:46:43.379970505Z","trace":"error in main > runFixes.func1.1 > processSyncMenu: connection refused","data":{"error":"connection refused","store_uuid":"9f21c3","subdomain":"gyg","tenant_id":"b9565b91"}}
 ```
 
 Sentry: `tags = {store_uuid: 9f21c3, subdomain: gyg, tenant_id: b9565b91, transaction: "SharedService > processSyncMenu"}`.
@@ -380,8 +395,8 @@ go func() {
 ```
 
 ```json
-{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:38:07Z","data":{"tenant_id":"b9565b91"}}
-{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:38:07Z","trace":"error in main > 1 > sync failed: connection refused","data":{"error":"connection refused","tenant_id":"b9565b91"}}
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T07:46:43.382252249Z","data":{"tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-24T07:46:43.382280066Z","trace":"error in main > runFixes.func2.1 > sync failed: connection refused","data":{"error":"connection refused","tenant_id":"b9565b91"}}
 ```
 
 Worth it when the same context is already being passed to the database layer,
@@ -408,11 +423,11 @@ go func() {
 }()
 ```
 
-Request span: `trace_id=2fb4533d5eb9f67d55201df20f83aca8 span_id=3b0a72104d4916e9`
+Request span: `trace_id=18a3a07d074a999441f61dc96322725d span_id=0e1003346cc6de16`
 
 ```json
-{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:38:07Z","trace_id":"2fb4533d5eb9f67d55201df20f83aca8","span_id":"3b0a72104d4916e9","data":{"subdomain":"gyg","tenant_id":"b9565b91"}}
-{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:38:07Z","trace":"error in main > 1 > sync failed: connection refused","trace_id":"2fb4533d5eb9f67d55201df20f83aca8","span_id":"3b0a72104d4916e9","data":{"error":"connection refused","subdomain":"gyg","tenant_id":"b9565b91"}}
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T07:46:43.384772857Z","trace_id":"18a3a07d074a999441f61dc96322725d","span_id":"0e1003346cc6de16","logging.googleapis.com/trace":"projects/cata-prod/traces/105445aa7843bc8bf206b12000100000","logging.googleapis.com/spanId":"000000000000004a","data":{"subdomain":"gyg","tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-24T07:46:43.384816121Z","trace":"error in main > runFixes.func3.1 > sync failed: connection refused","trace_id":"18a3a07d074a999441f61dc96322725d","span_id":"0e1003346cc6de16","logging.googleapis.com/trace":"projects/cata-prod/traces/105445aa7843bc8bf206b12000100000","logging.googleapis.com/spanId":"000000000000004a","data":{"error":"connection refused","subdomain":"gyg","tenant_id":"b9565b91"}}
 ```
 
 ```text
@@ -422,9 +437,9 @@ detached ctx err = <nil>             <- goroutine keeps working
 
 Everything comes back: `tenant_id`, `subdomain` (from the forwarded gRPC
 metadata), `trace_id`, `span_id` — plus the `logging.googleapis.com/*` fields,
-which appear here because a project ID is configured (see
-[Configuration](#configuration)); without one the entry still carries
-`trace_id`. And the
+which appear here because the request carried `X-Cloud-Trace-Context` and a
+project ID is configured (see [Configuration](#configuration)); without either
+the entry still carries `trace_id`. And the
 Sentry event is tagged `trace_id=2fb4533d…`, i.e. on the request's own trace.
 Because the values survive, the detached context is also the one to hand to
 outbound calls in that goroutine.
@@ -444,14 +459,14 @@ go func() {
 }()
 ```
 
-Request span: `trace_id=a69891eead1c145050a5b5109d085539 span_id=135e718dbd548cf0`
+Request span: `trace_id=37213ede77101a4811640dd245d8391d span_id=e992597a62b11cf4`
 
 ```json
-{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:38:07Z","trace_id":"a69891eead1c145050a5b5109d085539","span_id":"de52d1a05d2ba923","data":{"subdomain":"gyg","tenant_id":"b9565b91"}}
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T07:46:43.387252655Z","trace_id":"37213ede77101a4811640dd245d8391d","span_id":"19111afc1887b4bd","logging.googleapis.com/trace":"projects/cata-prod/traces/105445aa7843bc8bf206b12000100000","logging.googleapis.com/spanId":"000000000000004a","data":{"subdomain":"gyg","tenant_id":"b9565b91"}}
 ```
 
-Same trace, own `span_id` (`de52d1a05d2ba923` vs the request's
-`135e718dbd548cf0`), tenant intact. This is the default choice for background
+Same trace, own `span_id` (`19111afc1887b4bd` vs the request's
+`e992597a62b11cf4`), tenant intact. This is the default choice for background
 work that outlives the handler.
 
 ### Case 4 — goroutine reusing the bound logger
@@ -468,14 +483,14 @@ go func() {
 }()
 ```
 
-Request span: `trace_id=e7c6e005e37dfeddef4f66eaec581000 span_id=b7ac5bcd9dc450ca`
+Request span: `trace_id=5da0938d25a990e60b46cf90dc425da3 span_id=01f5716797191066`
 
 ```json
-{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:34:51Z","trace_id":"e7c6e005e37dfeddef4f66eaec581000","span_id":"b7ac5bcd9dc450ca","data":{"tenant_id":"b9565b91"}}
-{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:34:51Z","trace":"error in main > 1 > sync failed: connection refused","trace_id":"e7c6e005e37dfeddef4f66eaec581000","span_id":"b7ac5bcd9dc450ca","data":{"error":"connection refused","tenant_id":"b9565b91"}}
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T07:46:20.606351662Z","trace_id":"5da0938d25a990e60b46cf90dc425da3","span_id":"01f5716797191066","logging.googleapis.com/trace":"projects/cata-prod/traces/105445aa7843bc8bf206b12000100000","logging.googleapis.com/spanId":"000000000000004a","data":{"tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-24T07:46:20.606366009Z","trace":"error in main > main.func4.1 > sync failed: connection refused","trace_id":"5da0938d25a990e60b46cf90dc425da3","span_id":"01f5716797191066","logging.googleapis.com/trace":"projects/cata-prod/traces/105445aa7843bc8bf206b12000100000","logging.googleapis.com/spanId":"000000000000004a","data":{"error":"connection refused","tenant_id":"b9565b91"}}
 ```
 
-Sentry: `trace_id=e7c6e005e37dfeddef4f66eaec581000`, `tenant_id=b9565b91`.
+Sentry: `trace_id=5da0938d25a990e60b46cf90dc425da3`, `tenant_id=b9565b91`.
 
 A cancelled context does not silence logging — the logger only reads values from
 it, never `ctx.Done()`. The goroutine reports under the request's own span; use
@@ -494,16 +509,18 @@ go func() {
 }()
 ```
 
-Request span: `trace_id=d7176516c130e4b8a780158d29c190a1 span_id=2737fd408e691a3d`
+Request span: `trace_id=2b70cb37e2c386cf146123d2560e94ca span_id=4566c10715b7ab76`
 
 ```json
-{"severity":"INFO","message":"sync started","timestamp":"2026-08-22T12:34:51Z","trace_id":"d7176516c130e4b8a780158d29c190a1","span_id":"c9a675f6c8bd1cc1","data":{"tenant_id":"b9565b91"}}
-{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-22T12:34:51Z","trace":"error in main > 1 > sync failed: connection refused","trace_id":"d7176516c130e4b8a780158d29c190a1","span_id":"c9a675f6c8bd1cc1","data":{"error":"connection refused","tenant_id":"b9565b91"}}
+{"severity":"INFO","message":"sync started","timestamp":"2026-08-24T07:46:20.609384998Z","trace_id":"2b70cb37e2c386cf146123d2560e94ca","span_id":"f98ff114127653c5","logging.googleapis.com/trace":"projects/cata-prod/traces/105445aa7843bc8bf206b12000100000","logging.googleapis.com/spanId":"000000000000004a","data":{"tenant_id":"b9565b91"}}
+{"severity":"ERROR","message":"sync failed: connection refused","timestamp":"2026-08-24T07:46:20.609400093Z","trace":"error in main > main.func5.1 > sync failed: connection refused","trace_id":"2b70cb37e2c386cf146123d2560e94ca","span_id":"f98ff114127653c5","logging.googleapis.com/trace":"projects/cata-prod/traces/105445aa7843bc8bf206b12000100000","logging.googleapis.com/spanId":"000000000000004a","data":{"error":"connection refused","tenant_id":"b9565b91"}}
 ```
 
-Same `trace_id` as the request, **different `span_id`** (`c9a675f6c8bd1cc1` vs
-`2737fd408e691a3d`) — the background work is a child span of the request, which
-is what you want for anything that outlives the handler.
+Same `trace_id` as the request, **different `span_id`** (`f98ff114127653c5` vs
+`4566c10715b7ab76`) — the background work is a child span of the request, which
+is what you want for anything that outlives the handler. `StartSpan` runs the
+operation on a private clone of the hub, so it never repoints the request hub's
+scope at the background span.
 
 ### Case 6 — several goroutines sharing one bound logger
 
@@ -531,9 +548,9 @@ is logical, not a data race.
 No `svclib.Init` / `sentry.Init` anywhere:
 
 ```json
-{"severity":"INFO","message":"plain info","timestamp":"2026-08-22T12:23:31Z","data":{"order_id":"123"}}
-{"severity":"WARNING","message":"a warning: timeout","timestamp":"2026-08-22T12:23:31Z","trace":"error in runtime > main > main > main > a warning: timeout","data":{"error":"timeout"}}
-{"severity":"ERROR","message":"Error with ctx: boom","timestamp":"2026-08-22T12:23:31Z","trace":"error in runtime > main > main > main > Error with ctx: boom","data":{"error":"boom","tenant_id":"tenant-1"}}
+{"severity":"INFO","message":"plain info","timestamp":"2026-08-24T07:46:59.483962226Z","data":{"order_id":"123"}}
+{"severity":"WARNING","message":"a warning: timeout","timestamp":"2026-08-24T07:46:59.484038035Z","trace":"error in main > main > a warning: timeout","data":{"error":"timeout"}}
+{"severity":"ERROR","message":"Error with ctx: boom","timestamp":"2026-08-24T07:46:59.484098417Z","trace":"error in main > main > Error with ctx: boom","data":{"error":"boom","tenant_id":"tenant-1"}}
 ```
 
 Nothing panics: `Info`, `Warn` and `Error` keep writing structured JSON (and so
@@ -559,18 +576,22 @@ is never useful.
 
 `Warn` and `Error` automatically walk the Go call stack using `runtime.Callers`:
 
-```
+```text
 error in <package> > <function> > ... > <ctx>: <error>
 ```
 
-The trace stops at HTTP/gRPC handler boundaries, showing only application-level call chains.
+The walk stops at framework boundaries, identified by fully-qualified package
+prefix (`net/http.`, `google.golang.org/grpc`, grpc-gateway, protobuf,
+`runtime.`, `testing.`) — so only application-level frames appear. Application
+closures keep their frames (`syncAll.func1`), and packages that merely contain
+"proto" or "http" in their own name are not cut off.
 
 ## Configuration
 
 | Variable | Values | Description |
 |---|---|---|
-| `APP_DEBUG` | `true` / anything else | Enable/disable `Debug` output |
-| `GOOGLE_CLOUD_PROJECT` (or `GCP_PROJECT`) | project ID | Enables the `logging.googleapis.com/trace` field |
+| `APP_DEBUG` | exactly `true` / anything else | Enable/disable `Debug` output (exact match, kds parity) |
+| `GOOGLE_CLOUD_PROJECT` (or `GCP_PROJECT`) | project ID | Enables the `logging.googleapis.com/trace` field — emitted only for requests whose forwarded `X-Cloud-Trace-Context` / `traceparent` header was parsed |
 
 Both can be set from code instead of the environment, for services that parse
 their own config:
