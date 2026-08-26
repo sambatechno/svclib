@@ -1,6 +1,10 @@
 package svclib
 
-import "context"
+import (
+	"context"
+
+	"github.com/getsentry/sentry-go"
+)
 
 // TenantContextKey is the standard context key for storing tenant ID across all services.
 // This key should be used consistently for both database queries and Sentry tagging.
@@ -34,3 +38,55 @@ type (
 	// sentryTraceContextKey stores the trace ID string in the context.
 	sentryTraceContextKey struct{}
 )
+
+// SpanFromContext returns the Sentry span attached to ctx, or nil when there is
+// none. A context can carry a span under two keys — the one this package's
+// interceptor/StartSpan store, and Sentry's own (set by sentry.StartSpan /
+// span.Context()) — and the innermost of the two wins:
+//
+//   - only one present: that one
+//   - Sentry's key holds a direct child of the span we track: that child
+//     (a plain sentry.StartSpan opened inside the handler)
+//   - otherwise: the interceptor's/StartSpan's span — our own key always
+//     tracks the innermost StartSpan (Sentry's key never advances past the
+//     transaction under nesting, so a same-trace preference would hand back
+//     the outermost span), and a detached foreign transaction must never
+//     capture the request's logs
+//
+// Known limit: a second plain sentry.StartSpan nested inside the first is no
+// longer a direct child of the tracked span and resolves back to it; nest with
+// svclib.StartSpan to keep span-level linkage exact.
+func SpanFromContext(ctx context.Context) *sentry.Span {
+	if ctx == nil {
+		return nil
+	}
+	grpcSpan, _ := ctx.Value(grpcSpanContextKey{}).(*sentry.Span)
+	sentrySpan := sentry.SpanFromContext(ctx)
+	switch {
+	case sentrySpan == nil:
+		return grpcSpan
+	case grpcSpan == nil || grpcSpan == sentrySpan:
+		return sentrySpan
+	case sentrySpan.ParentSpanID == grpcSpan.SpanID:
+		return sentrySpan
+	default:
+		return grpcSpan
+	}
+}
+
+// TraceIDFromContext returns the distributed trace ID for ctx, or "" when the
+// context carries no trace. It reads the current span first and falls back to
+// the trace ID string StartSpan / UnaryServerInterceptor store on the context,
+// which is what survives into a goroutine that only kept the context.
+func TraceIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if span := SpanFromContext(ctx); span != nil {
+		return span.TraceID.String()
+	}
+	if traceID, ok := ctx.Value(sentryTraceContextKey{}).(string); ok {
+		return traceID
+	}
+	return ""
+}

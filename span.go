@@ -28,10 +28,11 @@ import (
 //	}()
 //
 // The function automatically:
-// - Creates a child span linked to the parent
-// - Handles hub cloning for goroutines (detects context.Background())
-// - Sets span status based on error (OK or InternalError)
-// - Captures errors to Sentry if error pointer is provided
+//   - Creates a child span linked to the parent (innermost span in the context)
+//   - Runs the operation on a private clone of the hub, so the caller's hub scope
+//     is never repointed at this operation's span
+//   - Sets span status based on error (OK or InternalError)
+//   - Captures errors to Sentry if error pointer is provided
 //
 // Returns the new context and a finish function that accepts an optional error pointer.
 func StartSpan(ctx context.Context, spanName string) (context.Context, func(*error)) {
@@ -41,46 +42,44 @@ func StartSpan(ctx context.Context, spanName string) (context.Context, func(*err
 		return ctx, func(*error) {}
 	}
 
-	// Detect if we're in a goroutine context (context.Background or no existing span chain)
-	// For goroutines, we need to clone the hub to avoid race conditions
-	isGoroutine := false
-	if ctx == context.Background() {
-		isGoroutine = true
-	}
+	// Always work on a private clone. ConfigureScope below sets the child span
+	// on the scope, and doing that on the caller's hub would repoint whatever
+	// else shares it — the handler still running on the request hub, a panic
+	// recovery, a plain hub.CaptureException — at this operation's span.
+	hub = hub.Clone()
 
+	// Detect if we're in a goroutine context (context.Background means the
+	// caller deliberately detached from the request)
+	isGoroutine := ctx == context.Background()
+
+	// Get parent span from context (innermost-wins across both span keys)
+	parentSpan := SpanFromContext(ctx)
+
+	// Base context for the operation, carrying the private hub
+	base := ctx
 	if isGoroutine {
-		hub = hub.Clone()
+		base = context.Background()
+		// Copy tenant ID if present
+		if tenantID, ok := GetTenantID(ctx); ok {
+			base = WithTenantID(base, tenantID)
+		}
 	}
+	base = sentry.SetHubOnContext(base, hub)
 
-	// Get parent span from context
-	var parentSpan *sentry.Span
-	if span, ok := ctx.Value(grpcSpanContextKey{}).(*sentry.Span); ok {
-		parentSpan = span
-	} else {
-		parentSpan = sentry.SpanFromContext(ctx)
-	}
-
-	// Create child span
+	// Create the child span — always from a context that carries the CLONE.
+	// sentry.StartSpan repoints the scope of whatever hub is on the context it
+	// is given (hub.Scope().SetSpan), and StartChild starts from the parent's
+	// stored context, which carries the caller's hub: creating the child there
+	// would silently redirect the request hub at this operation's span.
 	var childSpan *sentry.Span
 	if parentSpan != nil {
-		childSpan = parentSpan.StartChild(spanName)
+		childSpan = sentry.StartSpan(sentry.SetHubOnContext(parentSpan.Context(), hub), spanName)
 	} else {
-		childSpan = sentry.StartSpan(ctx, spanName)
+		childSpan = sentry.StartSpan(base, spanName)
 	}
 	childSpan.Description = spanName
 
-	// Create new context with hub and span
-	newCtx := ctx
-	if isGoroutine {
-		newCtx = context.Background()
-		// Copy tenant ID if present
-		if tenantID, ok := GetTenantID(ctx); ok {
-			newCtx = WithTenantID(newCtx, tenantID)
-		}
-	}
-
-	newCtx = sentry.SetHubOnContext(newCtx, hub)
-	newCtx = context.WithValue(newCtx, grpcSpanContextKey{}, childSpan)
+	newCtx := context.WithValue(base, grpcSpanContextKey{}, childSpan)
 	newCtx = context.WithValue(newCtx, sentryTraceContextKey{}, childSpan.TraceID.String())
 
 	// Configure hub scope to use this span
@@ -108,4 +107,3 @@ func StartSpan(ctx context.Context, spanName string) (context.Context, func(*err
 
 	return newCtx, finish
 }
-

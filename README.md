@@ -12,6 +12,7 @@ A Go library providing observability infrastructure for microservices, with a fo
 ✅ **Tenant Tagging** - Automatic tenant context in all traces and errors  
 ✅ **Performance Tracking** - Granular span tracking with `StartSpan`  
 ✅ **Zero-Config Goroutines** - Errors in goroutines automatically linked to parent traces  
+✅ **Structured Logging** - Cloud Logging JSON with severity, fields and trace IDs  
 ✅ **Standard Utilities** - HeaderMatcher and ParseMockTenant helpers  
 
 ---
@@ -86,6 +87,7 @@ func main() {
   - [Initialization](#initialization)
   - [Context Management](#context-management)
   - [Error Logging](#error-logging)
+  - [Structured Logging](#structured-logging)
   - [HTTP Middleware](#http-middleware)
   - [gRPC Interceptors](#grpc-interceptors)
   - [Performance Tracking](#performance-tracking)
@@ -209,6 +211,51 @@ go func(ctx context.Context) {
 - ✅ Automatically links to current span/trace
 - ✅ Works in handlers, goroutines, and background tasks
 - ✅ No special handling needed - just pass context
+
+---
+
+### Structured Logging
+
+`svclib/logger` writes structured JSON entries for Cloud Run / Cloud Logging,
+with severity levels, per-request fields, Sentry tags — and the trace ID of the
+current span, so logs and Sentry events line up on the same trace.
+
+```go
+import "github.com/sambatechno/svclib/logger"
+
+type server struct {
+    Logger logger.ILogger
+}
+
+srv := &server{Logger: logger.New("SharedService")}
+
+func (s *server) SyncMenu(ctx context.Context, req *pb.SyncMenuRequest) error {
+    log := s.Logger.WithContext(ctx) // binds trace_id + tenant_id/subdomain
+    log.Info("sync started", map[string]any{"store_id": req.StoreId})
+
+    if err := s.sync(ctx, req); err != nil {
+        log.Error("SyncMenu", map[string]string{"provider": "revel"}, err)
+        return err
+    }
+    return nil
+}
+```
+
+```json
+{"severity":"INFO","message":"sync started","timestamp":"2026-03-25T10:00:00Z",
+ "trace_id":"d4cda95b652f4a1592b449d5929fda1b","span_id":"1e5e29a5b4b9c1f2",
+ "data":{"tenant_id":"b9565b91-...","subdomain":"gyg","store_id":"42"}}
+```
+
+**Features:**
+- ✅ `Info` / `Warn` / `Error` / `Debug` mapped to Cloud Logging severities
+- ✅ `WithContext` picks up trace ID, tenant and subdomain from the request context
+- ✅ `WithFields` for call sites that have no context
+- ✅ `Error` reports to Sentry on the context's hub/span, tagged and fingerprinted
+- ✅ Application stack trace on `Warn` / `Error`
+
+Same API as the logger in kds-management-service — see
+[logger/README.md](logger/README.md) for the full guide.
 
 ---
 
@@ -447,6 +494,10 @@ func GetTenantID(ctx context.Context) (string, bool)
 // Error Logging
 func LogError(ctx context.Context, label string, err error)
 
+// Trace Access
+func SpanFromContext(ctx context.Context) *sentry.Span
+func TraceIDFromContext(ctx context.Context) string
+
 // Middleware
 func TenantTaggingMiddleware(next http.Handler) http.Handler
 func TenantTaggingMiddlewareWithExtractor(
@@ -463,6 +514,27 @@ func StartSpan(ctx context.Context, spanName string) (context.Context, func(*err
 // Utilities
 func DefaultHeaderMatcher() runtime.HeaderMatcherFunc
 func ParseMockTenant() string
+```
+
+#### `svclib/logger`
+
+```go
+type ILogger interface {
+    Info(msg string, data ...map[string]any)
+    Warn(ctx string, err error)
+    Error(ctx string, tags map[string]string, err error)
+    Debug(ctx string, req any)
+    WithFields(fields map[string]any) ILogger
+    WithContext(ctx context.Context) ILogger
+}
+
+func New(prefix string) ILogger
+
+// Configuration (defaults come from APP_DEBUG / GOOGLE_CLOUD_PROJECT)
+func SetDebugEnabled(enabled bool)
+func ResetDebugEnabled()
+func SetProjectID(projectID string)
+func ResetProjectID()
 ```
 
 ---
@@ -524,6 +596,19 @@ Issues and pull requests welcome! Please ensure:
 ---
 
 ## Changelog
+
+### Unreleased
+- `svclib/logger`: structured Cloud Logging JSON logger (ported from
+  kds-management-service) with trace-ID correlation, trace-linked Sentry
+  reporting, and Cloud Logging request-log join fields parsed from the
+  forwarded `X-Cloud-Trace-Context` / `traceparent` header
+- `SpanFromContext` / `TraceIDFromContext` helpers for reading the current trace
+  (innermost-wins across the interceptor's and Sentry's own span keys)
+- `StartSpan` and the server interceptor no longer repoint a shared hub's scope:
+  spans are created against a private hub clone
+- `UnaryServerInterceptor` registers its span under Sentry's own context key
+  (when self-parented), so a plain `sentry.StartSpan(ctx, ...)` in a handler
+  parents onto the request instead of opening a detached transaction
 
 ### v0.1.0 (Initial Release)
 - Sentry initialization

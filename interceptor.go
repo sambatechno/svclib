@@ -72,6 +72,15 @@ func UnaryServerInterceptor() grpc.UnaryServerInterceptor {
 		grpcSpan := createGRPCSpan(ctx, parentSpan, info.FullMethod)
 		defer grpcSpan.Finish()
 
+		// When the span was started from this ctx (no registry parent), adopt
+		// the span's context: it carries the span under sentry's own key, so a
+		// plain sentry.StartSpan(ctx, ...) in the handler parents correctly
+		// instead of opening a detached transaction. With a registry parent the
+		// span's context belongs to the HTTP request, so it cannot be adopted.
+		if parentSpan == nil {
+			ctx = grpcSpan.Context()
+		}
+
 		// Add tags from metadata
 		tagSpanFromMetadata(grpcSpan, hub, md, info.FullMethod)
 
@@ -146,7 +155,16 @@ func createGRPCSpan(ctx context.Context, parentSpan *sentry.Span, method string)
 	var span *sentry.Span
 
 	if parentSpan != nil {
-		span = parentSpan.StartChild("grpc.server")
+		// Start the child from a context carrying THIS request's hub.
+		// sentry.StartSpan repoints the scope of whatever hub is on the context
+		// it is given, and parentSpan.Context() carries the HTTP request's hub —
+		// starting from it directly would redirect the HTTP request's scope at
+		// this gRPC span while the HTTP handler is still running on it.
+		creation := parentSpan.Context()
+		if hub := sentry.GetHubFromContext(ctx); hub != nil {
+			creation = sentry.SetHubOnContext(creation, hub)
+		}
+		span = sentry.StartSpan(creation, "grpc.server")
 	} else {
 		span = sentry.StartSpan(ctx, "grpc.server")
 	}
