@@ -14,6 +14,7 @@ A Go library providing observability infrastructure for microservices, with a fo
 ✅ **Zero-Config Goroutines** - Errors in goroutines automatically linked to parent traces  
 ✅ **Structured Logging** - Cloud Logging JSON with severity, fields and trace IDs  
 ✅ **Standard Utilities** - HeaderMatcher and ParseMockTenant helpers  
+✅ **Tenant Settings** - Feature flags and renamed setting keys resolved by old or new name, with deprecation warnings ([settings](settings/README.md))  
 
 ---
 
@@ -409,6 +410,19 @@ by `SetBody`; `GET` and `DELETE` ignore it.
 
 **Note:** these methods report transport failures only. A 4xx or 5xx comes back
 as a nil error with the response and body, so check `resp.StatusCode` yourself.
+
+---
+
+### Tenant Settings
+
+`github.com/sambatechno/svclib/settings` reads tenant settings and feature
+flags by legacy or new name and logs a `WARNING` naming the service whenever a
+legacy key is read. See [settings/README.md](settings/README.md).
+
+```go
+r := settings.New(store, settings.WithService("order-service"))
+on, err := r.IsEnabled(ctx, "FF_SPECIAL_TIER")
+```
 
 ---
 
