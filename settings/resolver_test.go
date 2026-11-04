@@ -375,3 +375,47 @@ func TestParseAndFormatBool(t *testing.T) {
 		t.Error("FormatBool")
 	}
 }
+
+func TestBuiltinAliasesApplyWhenTableMissing(t *testing.T) {
+	store := pilotStore()
+	store.aliasesErr = errors.New("Table 'setting_aliases' doesn't exist")
+	store.flagsErr = errors.New("Table 'feature_flags' doesn't exist")
+	rec := &recorder{}
+	opts := append(rec.opts(), WithBuiltinAliases(
+		Alias{LegacyKey: "IS_SHOW_SPECIAL_TIER", NewKey: "FF_SPECIAL_TIER", Target: TargetFeatureFlags, SourceOfTruth: SourceNew},
+		Alias{LegacyKey: "", NewKey: "FF_IGNORED", Target: TargetFeatureFlags},
+	))
+	r := New(store, opts...)
+
+	on, err := r.IsEnabled(tenantCtx("t1"), "FF_SPECIAL_TIER")
+	if err != nil || !on {
+		t.Fatalf("FF_SPECIAL_TIER = %v, %v; want legacy fallback true", on, err)
+	}
+}
+
+func TestDatabaseAliasWinsOverBuiltin(t *testing.T) {
+	store := pilotStore()
+	rec := &recorder{}
+	opts := append(rec.opts(), WithBuiltinAliases(
+		// Conflicts with the DB row for IS_SHOW_SPECIAL_TIER: ignored.
+		Alias{LegacyKey: "IS_SHOW_SPECIAL_TIER", NewKey: "FF_OTHER", Target: TargetFeatureFlags},
+		// Conflicts with the DB row's new key: ignored.
+		Alias{LegacyKey: "IS_SOMETHING", NewKey: "FF_SPECIAL_TIER", Target: TargetFeatureFlags},
+		// Not in the DB: applies.
+		Alias{LegacyKey: "CURRENCY", NewKey: "FF_CURRENCY_FLAG", Target: TargetFeatureFlags},
+	))
+	r := New(store, opts...)
+	ctx := tenantCtx("t1")
+
+	_, _, _ = r.Get(ctx, "IS_SHOW_SPECIAL_TIER")
+	if len(rec.deprecated) != 1 || rec.deprecated[0].NewKey != "FF_SPECIAL_TIER" {
+		t.Fatalf("deprecations = %+v, want the DB alias", rec.deprecated)
+	}
+	if _, found, _ := r.Get(ctx, "IS_SOMETHING"); found {
+		t.Fatal("IS_SOMETHING must not resolve: its builtin alias was shadowed")
+	}
+	v, found, _ := r.Get(ctx, "CURRENCY")
+	if !found || v != "false" {
+		t.Fatalf("CURRENCY via builtin alias = %q, %v; want legacy normalized to false", v, found)
+	}
+}

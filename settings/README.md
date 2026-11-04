@@ -35,6 +35,11 @@ values, err := resolver.GetMany(ctx, []string{"CURRENCY", "IS_SHOW_SPECIAL_TIER"
 | A legacy key | The value of its replacement, plus a deprecation warning |
 | Either name of a settings alias | The row named by `source_of_truth` (the other row if it is missing) |
 
+Pass the aliases your service already knows with
+`settings.WithBuiltinAliases(...)`. They apply when `setting_aliases` can't be
+read or has no row for a key (for example when the service deploys before the
+migration has run); a database row always wins.
+
 Only a failed `settings` read is an error. If `setting_aliases` or
 `feature_flags` can't be read (for example, the tenant's migration hasn't run
 yet), the resolver logs once and answers from `settings` alone.

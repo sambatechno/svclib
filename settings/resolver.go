@@ -48,6 +48,7 @@ type Resolver struct {
 	now          func() time.Time
 	onDeprecated func(context.Context, Deprecation)
 	onDegraded   func(context.Context, string, error)
+	builtin      []Alias
 
 	mu      sync.Mutex
 	aliases map[string]*aliasSet // by tenant
@@ -96,6 +97,14 @@ func WithDeprecationHandler(fn func(context.Context, Deprecation)) Option {
 // feature flag table can't be read.
 func WithDegradedHandler(fn func(ctx context.Context, what string, err error)) Option {
 	return func(r *Resolver) { r.onDegraded = fn }
+}
+
+// WithBuiltinAliases registers aliases the service knows at compile time. They
+// apply when the tenant's setting_aliases table can't be read or has no row
+// for that key (for example when the service deploys before the migration
+// runs); a setting_aliases row for the same legacy or new key always wins.
+func WithBuiltinAliases(aliases ...Alias) Option {
+	return func(r *Resolver) { r.builtin = append(r.builtin, aliases...) }
 }
 
 func withClock(now func() time.Time) Option {
@@ -297,6 +306,19 @@ func (r *Resolver) aliasesFor(ctx context.Context) *aliasSet {
 	}
 	for _, a := range rows {
 		if a.LegacyKey == "" || a.NewKey == "" {
+			continue
+		}
+		set.byLegacy[a.LegacyKey] = a
+		set.byNew[a.NewKey] = a
+	}
+	for _, a := range r.builtin {
+		if a.LegacyKey == "" || a.NewKey == "" {
+			continue
+		}
+		if _, ok := set.byLegacy[a.LegacyKey]; ok {
+			continue
+		}
+		if _, ok := set.byNew[a.NewKey]; ok {
 			continue
 		}
 		set.byLegacy[a.LegacyKey] = a
