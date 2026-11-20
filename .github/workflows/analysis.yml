@@ -1,0 +1,43 @@
+name: Analysis
+
+# SonarQube Cloud CI analysis (INFRA-725): tests with coverage, then the scan.
+# Runs on every PR (no path filter): "SonarCloud Code Analysis" is meant to be a
+# required check, and a skipped run would leave a PR waiting.
+# Automatic Analysis must stay OFF for this project in SonarQube Cloud
+# (Administration > Analysis Method), otherwise the CI scan is rejected.
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0 # full history for blame and the new-code period
+
+      - name: Setup Go
+        uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Test
+        run: go test -coverprofile=cov.out ./...
+
+      - name: Analyze with SonarCloud
+        uses: SonarSource/sonarqube-scan-action@689fb39b34b9aa95ebc5f8f119343ddd51542402 # v4
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
